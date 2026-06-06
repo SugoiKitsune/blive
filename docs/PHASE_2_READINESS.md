@@ -3,16 +3,20 @@ id: PHASE_2_READINESS
 title: Phase 2 Readiness Audit
 status: DRAFT
 owner: shared
-last_reviewed: 2026-05-06
-version: 0.1
+last_reviewed: 2026-06-06
+version: 0.2
 sources:
   - docs/PHASE_1_READINESS.md
+  - docs/retros/M3_retrospective.md
   - docs/retros/M2-IB_retrospective.md
   - TASK_REGISTRY.md
   - CONTEXT_INVENTORY.md
+  - lab/research/r_lev_001_triple_leveraged_etf (incoming Phase-2 strategy candidate; external to this repo)
 depends_on:
+  - RETRO-M3
   - RETRO-M2-IB
   - PHASE_1_READINESS
+  - OQ-032
 referenced_by: []
 ---
 
@@ -20,418 +24,668 @@ referenced_by: []
 
 ## Purpose
 
-A one-time gate document. Before drafting the M3 / Phase 2 plan,
-this audit checks whether we have enough substrate to plan well,
-and identifies what specifically blocks or merely informs the
-planning. Mirrors [`PHASE_1_READINESS`](./PHASE_1_READINESS.md) in
-shape; informed this time by the *real* outcomes of M2-IB rather
-than the paper-clean architectural state at M0 entry.
+A phase-boundary gate document. Before drafting the **Phase 2
+(M4 → M8)** plan, this audit checks whether we have enough
+substrate to plan well, and identifies what specifically blocks
+or merely informs the planning. Mirrors
+[`PHASE_1_READINESS`](./PHASE_1_READINESS.md) in shape; informed
+this time by the *real* outcomes of **all of Phase 1 (M0 → M3,
+G4 PASSED)** rather than the pre-execution architectural state.
 
-**Wall-clock state**: as of the `M2-IB.6-close` commit on
-2026-05-06. The closing retrospective is
-[RETRO-M2-IB v1.0](./retros/M2-IB_retrospective.md) — the
-load-bearing input here. Per
-[CONTEXT_PROTOCOL §8.3.2](../CONTEXT_PROTOCOL.md), this audit is
-the **second** of the three phase-boundary sessions; it does
-**not** draft the M3 plan.
+Per [CONTEXT_PROTOCOL §8.3.2](../CONTEXT_PROTOCOL.md), this is the
+**second of the three** M3 → M4 / Phase-1 → Phase-2 boundary
+sessions: (1) implementation close ✓ [M3 close]; (2) **this
+session — readiness-audit refresh**; (3) plan-drafting. It is an
+**audit, single-mode** — it does **not** draft the Phase-2 plan,
+resolve [OQ-032](./decisions/OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure),
+or write code.
+
+**Wall-clock state**: as of the `M3-close` commit / tag on
+2026-06-05 (+ the ADR-053 Python-3.12 tooling commit `601b1a2`).
+G4 PASSED on all 10 exit criteria. The load-bearing input here is
+[RETRO-M3 v1.0](./retros/M3_retrospective.md); substrate is
+internally consistent, no PROPOSED ADRs remain, 591 tests green.
+
+## What changed since v0.1 (the refresh)
+
+[v0.1](#changelog) was written 2026-05-06 at the `M2-IB.6-close`
+commit — **before M3 ran**. At that point "M3" and "Phase 2" were
+conflated: v0.1 audited readiness to draft *the M3 plan* (which
+it called "the M3 / Phase 2 plan"). M3 has since been planned,
+executed, and **closed as the final Phase-1 milestone** (M0 → M3
+= Phase 1; G4 PASSED). The genuine phase boundary is therefore
+**now**, at M3 → M4, and the forward question is the *real*
+Phase 2 (M4 .. M8) plan that session 3 drafts.
+
+v0.2 does three things:
+
+1. **Closes v0.1's loop** — the five cross-cutting questions v0.1
+   raised as the M3-plan agenda are now *answered by M3*; see the
+   table below.
+2. **Re-audits the eight dimensions** against M3's real outcomes
+   (the leverage trilemma / [OQ-032](./decisions/OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure),
+   the M3.4 equity-bug fix, the M3.5 reconnect gap / KB-7 FM-1,
+   the structural QQL3 non-fill / [ADR-052](./decisions/DECISIONS.md#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1),
+   the ADR-050/051 unit-of-quote + tick-grid fixes). Each
+   dimension carries a **Δ since v0.1** note.
+3. **Folds in the incoming Phase-2 strategy candidate** —
+   R-LEV-001 "VIX Term Structure Rotation" (the operator's
+   `lab/research/r_lev_001_triple_leveraged_etf` deep-analysis
+   notebook + `STRATEGY_METADATA.md`) — and raises the new OQs it
+   forces (OQ-033 / OQ-034 / OQ-035).
+
+### The incoming Phase-2 strategy candidate (R-LEV-001) in one paragraph
+
+A **VIX term-structure rotation**: ratio = UX6 / UX1 (6-month vs
+front-month VIX futures); compare to its 252-day rolling median.
+**Risk-ON / contango** (ratio > median) → 100% **TQQQ**;
+**Risk-OFF / backwardation** (ratio < median) → 100% **VXX** for
+the first 3 days (capture the vol spike), then 100% **IEF** from
+day 4 (safe harbour); counter resets on every risk-on flip.
+**MOO** (Market-On-Open, T+1) execution; ~42 regime switches/year
+(~6000%/yr turnover). Backtest 2011–2026: CAGR 157.5%, Sharpe
+3.39, MDD −33.9%, vol 46.4%. Already productionised *outside*
+blive (sfera signal `vix_vxx_rotation.py` → a `signals` parquet),
+sourcing UX1/UX6 from Bloomberg (`bbgidx.index_prices`) — though
+blive will **re-source from EODHD**, not consume sfera's output.
+For blive this is **more** data-, leverage-, and vol-dependent
+than the current A3; its all-US-domiciled universe re-raises the
+retail-tradability question — which **Professional-Client
+classification would lift** (route A), or a retail substitution
+must solve (route B) (see Dimensions 1, 2, 3, 7).
+
+### v0.1's five cross-cutting questions — now answered by M3
+
+| v0.1 question (the M3-plan agenda) | M3 outcome |
+|---|---|
+| 1. OQ-031 sequencing (resolve vs inform) | **Both** — M3 ran the bounded empirical capture *and* resolved OQ-031: [ADR-052](./decisions/DECISIONS.md#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) Option 1 (accept the non-fill). |
+| 2. Empirical fill-rate window scope | Re-scoped (plan-call #6) to a **bounded deterministic capture**; result: QQL3 **0/69** fills vs IBTM **6/6**; 2161 cap-binding 0; zero rejects/breaches/error-110. |
+| 3. EODHD-vs-IB unit-of-quote reconciliation timing | **Shipped in M3** — [ADR-050](./decisions/DECISIONS.md#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) (magnitude, ÷10) + [ADR-051](./decisions/DECISIONS.md#adr-051--normalize-ib-order-prices-to-the-contract-tick-grid-at-submit-time) (tick-grid) + RC-10 (price sanity). Was *two* entangled error-110 bugs. |
+| 4. Strategy-slot scope (A3-only vs invite A1/A1a) | **A3-only** (plan-call #4); A1/A1a stay forward-listed. |
+| 5. Phase-2 substrate prerequisites | **Partially** — KB-7 / KB-15 / INV-8 / INV-9 are now DRAFT stubs (M3 produced them); the full RC catalogue + DD-4 (SQLite) remain M4. |
+
+The v0.1 questions are retired. The **new** agenda — what gates the
+Phase-2 plan-drafting session — is in the next section.
 
 ## Conventions
 
 Status per dimension: ✓ READY · ⚠ PARTIAL · ✗ BLOCKING.
 
-The question being asked is: **can we draft a credible M3 / Phase
-2 plan today, or does something have to be settled first?**
+The question being asked is now: **can we draft a credible Phase 2
+(M4 .. M8) plan in session 3, or does something have to be
+settled first?**
 
 ---
 
-## Cross-cutting summary — five questions that gate the M3 plan-drafting session
+## Cross-cutting summary — six questions that gate the Phase-2 plan-drafting session
 
-These are the questions whose answers become the *agenda* of the
-plan-drafting session, not its output. None of them is resolved
-here.
+These become the *agenda* of session 3 (plan-drafting), not its
+output. None is resolved here. They supersede v0.1's five.
 
-1. **OQ-031 sequencing.** Does M3 *resolve* [OQ-031](./decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account)
-   (the PMA-bound deployment trade-off) as a Phase 1 live-cutover
-   precondition, or does M3 run an empirical paper-mode window
-   that *informs* a later resolution? The four resolution options
-   in OQ-031 (accept the constraint / pursue Pro Client / substitute
-   non-leveraged leg / restructure as passive-limit-only) imply
-   different M3 work scopes.
-2. **Empirical fill-rate window scope.** What minimum paper-mode
-   trading-day count produces statistically meaningful fill-rate
-   data on QQL3 given the [INV-14 v0.7](./inv/ib_error_codes.md)
-   evidence that PMA cap binding is regime-dependent on the
-   leveraged equity leg? (RETRO-M2-IB §"Recommendations" suggested
-   1–2 trading weeks; the plan-drafting session pins the number.)
-3. **EODHD-vs-IB unit-of-quote reconciliation timing.** Does M3
-   ship the QQL3 10× price-discrepancy reconciliation
-   (M2-IB.6.2c side-finding) as M7 parity preparation, or defer
-   it to M7 proper? The discrepancy currently undersizes positions
-   10× and pre-empts IB warning 2161 with IB error 110 ("price not
-   in allowed range") at LMT computation time.
-4. **Strategy-slot scope through Phase 1 deployment.** Does M3
-   stay single-strategy on A3 (the operator-chosen Phase 1
-   candidate per [ADR-043](./decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)),
-   or invite A1 (`xsec_momentum_long_short_sp500`) / A1a
-   (`lagging_indecies`) as parallel candidates? This shapes whether
-   Phase 2 entry needs the multi-strategy NAV-allocation question
-   ([OQ-010](./decisions/OPEN_QUESTIONS.md#oq-010--capital-allocation-explicit-per-strategy-nav-slice-or-shared-account))
-   answered earlier than its M4 default.
-5. **Phase 2 substrate prerequisites.** Which Phase 2 / M4+
-   artefacts (KB-7 `failure_modes` MISSING, KB-15 `parity_methodology`
-   MISSING, full RC-01..RC-08 catalogue, DD-4 `storage_schemas`
-   MISSING for SQLite, INV-8 metrics, INV-9 alerts) must be at
-   least DRAFT before Phase 2 entry, vs land inside their owning
-   M4+ milestone?
+1. **[OQ-032](./decisions/OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)
+   — the leverage trilemma and the Phase-2 strategy's shape.**
+   The trilemma (PRIIPs blocks US leveraged ETPs per
+   [ADR-047](./decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043);
+   PMA / warning 2161 blocks UK leveraged ETPs per
+   [ADR-049](./decisions/DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding);
+   Cash blocks margin) binds for a **retail** account — and **the
+   operator will stay retail near-term** (not currently eligible for
+   elective-professional classification), so **route B (retail) is
+   the active path** and **route A (Professional Client) is
+   deferred** (documented below; revisit if eligibility changes).
+   The live OQ-032 decision is therefore the **retail leverage
+   lever**:
+   - **Preserve ~3× via margin on a 1× Nasdaq-100 UCITS** (OQ-032
+     Option 1) — hold a UK-retail-eligible 1× Nasdaq-100 UCITS ETF
+     and obtain ≈3× through 3:1 margin (a low-vol 1× UCITS very
+     likely dodges the 2161 PMA cap; **needs a Cash → Margin
+     account conversion** + a no-PMA validation + financing parity,
+     [KB-6 §4](./kb/cost_margin_dictionary.md)).
+   - **De-lever to 1×** (Option 3) — drop the leverage; simplest;
+     changes the strategy's risk/return.
+   - **Restructure** (Option 4) — redefine around the cap; fresh
+     ADR + parity envelope.
+   **The operator picks among these in session 3** (this audit does
+   not resolve it). The **Cash → Margin** conversion is the
+   lead-time-bearing prerequisite for the leverage-preserving
+   sub-path (the paper account `DUP886336` is Cash + GBP-base).
+   *Deferred — route A (Professional Client):* lifts PRIIPs (trade
+   the US originals; leverage via the 3× ETP; Cash suffices) but
+   needs elective-pro eligibility (2 of 3 — ~£/€500k portfolio /
+   financial-sector experience / ≥ 10 significant trades per
+   quarter) the operator does not currently meet; the cleaner path
+   if/when eligible. Both routes are homed inside OQ-032 (margin
+   path = Option 1; Professional = Option 2).
+2. **Is the incoming VIX strategy (R-LEV-001) the Phase-2
+   target?** It forces three new OQs:
+   **[OQ-033](./decisions/OPEN_QUESTIONS.md#oq-033--phase-2-vix-strategy-ux1--ux6-vix-futures-term-structure-data-sourcing)**
+   (UX1/UX6 VIX-futures term-structure data — to be sourced from
+   **EODHD**; the open part is whether EODHD's coverage + history
+   suffice),
+   **[OQ-034](./decisions/OPEN_QUESTIONS.md#oq-034--phase-2-vix-strategy-uk-retail-tradability-of-the-tqqq--vxx--ief-universe)**
+   (universe & instrument design — route A makes the US originals
+   tradeable, route B needs UCITS substitutes; **the VXX leg is
+   replaced with a mid-term 3-/6-month vol product either way** — a
+   deliberate design choice, less roll-decay than VXX's
+   front-month), and
+   **[OQ-035](./decisions/OPEN_QUESTIONS.md#oq-035--phase-2-order-type--tif-surface-moo--opg-for-market-on-open-execution)**
+   (MOO/OPG order types blive lacks) — plus a **signal-ingestion
+   path** call (port R-LEV-001 to the btest DSL vs a blive-native
+   signal module computing from EODHD; **no** sfera / static-parquet
+   handoff). Session 3 decides: adopt, adapt, or defer it.
+3. **M5-reconnect minimal fix — a Phase-2-entry precondition, or
+   M5-internal?** The M3.5 drill confirmed no native disconnect
+   detection ([KB-7](./kb/failure_modes.md) FM-1); RETRO-M3
+   recommends at least the `disconnectedEvent` fix for any
+   multi-day live run. The full watchdog + continuous
+   reconciliation is M5. Where does the minimal fix sit?
+4. **Risk-calibration & RC-catalogue timing.** The incoming
+   strategy's vol 46.4% / MDD −33.9% / ~6000% turnover makes RC-01
+   (gross leverage) / RC-11 (drawdown scaling) / RC-02..07
+   (exposure / concentration) load-bearing *earlier* than M4's
+   default. M3.4 also unblocked wiring **live equity** (now a
+   correct consolidated BASE total) into sizing (still synthetic
+   $100k). Does session 3 pull the full RC catalogue + live-equity
+   sizing forward?
+5. **L0/L1 agentic-execution tooling
+   ([OQ-028](./decisions/OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1)
+   / [OQ-029](./decisions/OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1))
+   — lowest-stakes; orthogonal to the trading work.** ADR-026 /
+   [CONTEXT_PROTOCOL §11](../CONTEXT_PROTOCOL.md) plan an agent
+   layer that automates *this discipline itself* (auto substrate
+   warm-up = L0; a drift / staleness watchdog = L1). The plan
+   parked it "post-G4"; G4 has now passed, so the trigger has
+   fired — the only question is build-any-now vs keep-deferring.
+   **Proposed default: reaffirm deferral (custom-light L0 only;
+   revisit if the manual substrate burden bites).** Flagged for
+   completeness; not load-bearing for the Phase-2 plan.
+6. **Phase-2 substrate prerequisites.** Which MISSING / stub
+   artefacts must be ≥ DRAFT *before* Phase 2 entry vs land inside
+   their owning M4+ milestone: DD-4 `storage_schemas` (MISSING —
+   M4 SQLite), **INV-2 order types / INV-3 TIFs** (MISSING — now
+   load-bearing via OQ-035), KB-7 / KB-15 / INV-8 / INV-9 (DRAFT
+   stubs — extend?), full RC-01..RC-08 + RC-11 catalogue.
 
 ---
 
-## 1. Strategy & universe — ⚠ PARTIAL (deployment-decision-gated)
+## 1. Strategy & universe — ⚠ PARTIAL (leverage-trilemma-gated; incoming strategy reinforces it)
+
+**Δ since v0.1.** v0.1's gate was OQ-031 (deployment under the
+PMA cap). M3 *resolved* OQ-031 — [ADR-052](./decisions/DECISIONS.md#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1)
+Option 1, on the M3.2 capture (QQL3 **0/69** vs IBTM **6/6**) —
+and surfaced the deeper structural finding: the **leverage
+trilemma** ([OQ-032](./decisions/OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
+The Phase-2 strategy candidate (R-LEV-001) is now known and
+*intensifies* the same constraint.
 
 - **READY**
-  - A3 (`triple_lev_sma_filter_dsl`) wire-validated end-to-end on
-    IB Paper (first FILL: IBTM 19 × £128.5 on 2026-05-06).
-    [ADR-043](./decisions/DECISIONS.md#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)
-    ACCEPTED.
-  - PRIIPs-compliant tradable universe codified: `QQL3` /
-    `IBTL` / `IBTM` per
-    [ADR-047](./decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043);
-    signal-only `QQQ` / `TLT` retained.
-  - Multi-instrument pipeline (`run_ib_multi_pipeline`) +
-    `LongShortPortfolio` btest dispatch wire-validated per
-    [ADR-044](./decisions/DECISIONS.md#adr-044--multi-instrument-pipeline-support-companion-to-adr-043) +
-    [ADR-045](./decisions/DECISIONS.md#adr-045--longshortportfolio-btest-dispatch-extends-adr-030).
-  - LSE-ETF SMART routing convention codified:
-    [ADR-048](./decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046)
-    ACCEPTED; [DD-7 v1.3](./dd/instrument_dictionary.md) §3 split
-    by `asset_class`.
+  - A3 (`triple_lev_sma_filter_dsl`) is wire-validated and
+    deployed (Phase 1) on the PRIIPs-compliant `QQL3` / `IBTL` /
+    `IBTM` universe per [ADR-047](./decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043);
+    multi-instrument pipeline + `LongShortPortfolio` dispatch
+    ([ADR-044](./decisions/DECISIONS.md#adr-044--multi-instrument-pipeline-support-companion-to-adr-043) /
+    [ADR-045](./decisions/DECISIONS.md#adr-045--longshortportfolio-btest-dispatch-extends-adr-030))
+    proven.
+  - The **deployment characteristic is now empirically
+    pinned**: the leveraged equity leg (QQL3) structurally does
+    not fill on the PMA-bound Cash account; Phase 1 runs
+    Treasury-dominated (ADR-052). No ambiguity remains for
+    Phase 1.
+  - The incoming R-LEV-001 signal is **already validated and
+    productionised** elsewhere (sfera), so blive inherits a
+    proven signal, not an unproven idea — its logic + metadata are
+    a known quantity to port (blive recomputes from EODHD; no
+    sfera / parquet dependency).
 - **GAPS**
-  - Strategy regime profile shifted: no UK-listed 3× US-Treasury
-    UCITS exists, so the bond leg drops 3× → 1× under ADR-047.
-    Backtest CAGR / Sharpe / MDD do **not** carry forward; the
+  - **The intended 3× equity exposure is unrealised** on the
+    current account (OQ-032). A3's regime profile is partly
+    inverted; backtest CAGR/Sharpe/MDD do not carry forward; the
     M7 parity envelope re-derives.
-  - QQL3 leg has a regime-dependent fill profile under the PMA
-    cap ([INV-14 v0.7](./inv/ib_error_codes.md), warning 2161):
-    fills only when the market mean-reverts to the cap level.
-    The intended trend-following profile is partially inverted.
-  - A1 (`xsec_momentum_long_short_sp500`) and A1a (`lagging_indecies`)
-    not wire-exercised against IB; not even substrate-validated
-    for IB-side instrument resolution.
+  - **The incoming VIX strategy's universe is entirely
+    US-domiciled** (TQQQ, VXX, IEF) → KID-less for UK retail, so on
+    the **active route B (retail)** the whole book needs UCITS
+    substitutes: **TQQQ → a 1× Nasdaq-100 UCITS + the OQ-032 margin
+    path** (to recover ~3×), **IEF → IBTM** (known), and **VXX → a
+    mid-term 3-/6-month vol UCITS** (a deliberate design choice —
+    less roll-decay than VXX's front-month — which must itself be
+    UK-retail-eligible + clear the PMA cap). Instrument selection +
+    the no-PMA / tradability probes are session-3 / M4 work
+    (→ OQ-034). (Route A would trade the US originals directly, but
+    is deferred — see the cross-cutting agenda.)
+  - **Signal-ingestion path undecided** — port R-LEV-001 to the
+    btest DSL (so blive's [ADR-010](./decisions/DECISIONS.md#adr-010--reuse-btests-factor--signal--portfolio-engines-by-import)
+    engine reuse applies) vs a blive-native signal module computing
+    the UX6/UX1 regime from EODHD data. (No sfera / static-parquet
+    handoff — blive re-sources from EODHD per the operator.)
+  - A1 (`xsec_momentum_long_short_sp500`) / A1a (`lagging_indecies`)
+    remain un-exercised against IB (unchanged from v0.1).
 - **BLOCKED**
-  - [OQ-031](./decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account)
-    OPEN; operator-deferred to M3 at M2-IB.6 close. Until
-    resolved (or accepted), the strategy's effective execution
-    profile on the leveraged equity leg is regime-dependent.
-- **Phase 2 entry question.** At what point does Phase 2 entry
-  require OQ-031 *resolved* (full deployment-mode commitment)
-  versus *orthogonal* (Phase 2 = post-Phase-1 expansion path; OQ-031
-  lives entirely in Phase 1 deployment scope and Phase 2 inherits
-  whichever option was chosen)?
+  - **OQ-032** OPEN — the central Phase-2 decision; resolved in
+    session 3.
+  - **OQ-034** OPEN — the universe's tradability + the VXX →
+    mid-term-vol design, which fork on the route A/B choice.
+- **Phase-2 entry question.** Which strategy is Phase 2's target
+  — A3 **redesigned** to restore leverage (OQ-032), or the VIX
+  rotation **adopted** (OQ-034) — and on which route (A
+  Professional / B retail)? On route A both strategies trade their
+  US originals directly; on route B both need the UCITS-substitute
+  treatment.
 
 ---
 
-## 2. Data feeds — ⚠ PARTIAL (parity envelope gap surfaced)
+## 2. Data feeds — ⚠ PARTIAL (Phase-1 reconciliation shipped; VIX-futures feed is a new gap)
+
+**Δ since v0.1.** v0.1's headline gap — the EODHD-vs-IB QQL3 10×
+discrepancy — is **resolved**: ADR-050 (unit-of-quote magnitude;
+`MANUAL_SCALE` ÷10 in `adapters/eodhd/conventions.py`) + ADR-051
+(tick-grid snap) + RC-10 (price sanity, INV-4 v0.2), with
+[KB-15](./kb/parity_methodology.md) `parity_methodology` written
+as a DRAFT stub. The *new* data gap is the incoming strategy's
+VIX-futures dependency.
 
 - **READY**
-  - EODHD daily refresh wired for the 5-ticker bundle
-    (`scripts/refresh_eodhd_signals.py`); broker-agnostic
-    credentials via `~/.blive/secrets/eodhd.env` per
-    [ADR-035](./decisions/DECISIONS.md#adr-035--secrets-handling-discipline-blivesecrets).
-  - Hybrid data routing (per-instrument, per-frequency) codified
-    in [ADR-017](./decisions/DECISIONS.md#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing).
-  - `IBMarketData` adapter wire-validated for historical bars
-    (US ETFs via delayed-daily tier; KB-3 §2 pacing exercised).
+  - EODHD daily refresh + hybrid per-instrument routing
+    ([ADR-017](./decisions/DECISIONS.md#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing));
+    `IBMarketData` historical bars wire-validated.
+  - **Unit-of-quote reconciliation solved for the Phase-1
+    universe** (ADR-050/051 + RC-10); the convention catalogue is
+    the curation surface for any future vendor-vs-IB divergence.
 - **GAPS**
-  - **EODHD-vs-IB QQL3 10× price discrepancy** (M2-IB.6.2c
-    side-finding): EODHD reports ~$383, IB reference ~$39 — likely
-    a recent reverse-split or EODHD unit-of-quote convention.
-    Strategy sizing uses EODHD's price → undersized 10× in actual
-    IB-dollar terms; LMTs computed from EODHD close × multiplier
-    pre-empt IB error 110 before warning 2161 fires. Not yet
-    catalogued in INV-14 (it's an EODHD-side issue, not an IB
-    error code).
-  - No live IB market-data subscription — strategy lacks a live
-    reference price for sizing / LMT computation.
-  - LSE-ETF subscription tier for live data not acquired (M2-IB.5
-    surfaced the SBF case; LSEETF is the equivalent here).
+  - **UX1 / UX6 VIX-futures term-structure data is not yet sourced
+    by blive** (→ [OQ-033](./decisions/OPEN_QUESTIONS.md#oq-033--phase-2-vix-strategy-ux1--ux6-vix-futures-term-structure-data-sourcing)).
+    **Decision taken (operator, 2026-06-06): source from EODHD** —
+    no sfera coupling, no static-signal parquet handoff. The open
+    part is empirical, not a channel choice: whether EODHD carries
+    a usable VIX-futures term-structure series (UX1/UX6, or
+    continuous front-/6-month) with ≥ 252-day history for the
+    rolling-median warm-up; an IB CFE futures subscription is the
+    fallback only if EODHD's coverage falls short.
+  - **No live IB market-data subscription** — sizing / LMT still
+    off the EODHD close (a constraint the operator *accepted*
+    permanently as ADR-050's free-MD-only A-route). Carries into
+    Phase 2 unless revisited.
+  - The **VXX-leg replacement** (a mid-term 3-/6-month vol product,
+    OQ-034) needs its own EODHD reference series + execution price.
 - **BLOCKED**
-  - Operator decision on EODHD vs IB live-data subscription cost
-    vs convenience trade-off.
-  - Reverse-split detection / handling on the EODHD side is out
-    of blive scope but affects sizing.
-- **Phase 2 entry question.** Does Phase 2 entry require the
-  EODHD unit-of-quote convention reconciled to IB reference (M7
-  parity infrastructure pre-empted in M3), or is it acceptable to
-  document the divergence and defer reconciliation to M7 proper?
+  - Whether EODHD's VIX-futures coverage suffices (OQ-033) — an
+    early-M4 probe; any live-MD subscription trade-off.
+- **Phase-2 entry question.** Does EODHD carry a VIX-futures
+  term-structure series sufficient for the UX6/UX1 signal
+  (coverage + ≥ 252-day history) and for the chosen mid-term vol
+  substitute — or is an IB CFE futures subscription needed as a
+  fallback (OQ-033)?
 
 ---
 
-## 3. Engine surface — ✓ READY (for A3 family; ⚠ PARTIAL for end-of-day MOC/LOC strategies)
+## 3. Engine surface — ✓ READY (for daily-RTH A3); ⚠ PARTIAL (MOO + replace() gaps for Phase-2 candidates)
+
+**Δ since v0.1.** The order-type surface is **unchanged** by M3
+(M3 was deployment-decision + data + reconciliation; it added
+RC-10 in *risk*, not new order types). The incoming strategy's
+MOO execution makes the v0.1 "no MOC/LOC/OPG" gap concrete and
+load-bearing.
 
 - **READY**
-  - `OrderType.ADAPTIVE_MKT` (IBALGO Adaptive) shipped per
-    [ADR-049](./decisions/DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding);
-    per-symbol `order_type_by_symbol` override on
-    `run_ib_multi_pipeline`.
-  - Multi-instrument pipeline wire-validated; per-symbol routing
-    correct (no cross-instrument confusion in M2-IB.6 wire runs).
-  - IBBroker FSM event emission wire-validated across SUBMITTED →
-    ACCEPTED → CANCELED / REJECTED / FILLED via both
-    `trade.statusEvent` and global `ib.errorEvent` channels
-    ([INV-14 v0.7](./inv/ib_error_codes.md) §"Reason-extraction
-    taxonomy").
-  - PaperBroker round-trip green from M0; broker registry
-    ([ADR-034](./decisions/DECISIONS.md#adr-034--multi-broker-registry-pattern-extends-adr-004))
-    supports paper / IB / IG dispatch.
+  - `MKT` / `LMT` / `ADAPTIVE_MKT` ([ADR-049](./decisions/DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding))
+    + per-symbol `order_type_by_symbol`; multi-instrument routing
+    correct; FSM emission wire-validated across SUBMITTED →
+    ACCEPTED → CANCELED / REJECTED / FILLED ([INV-14](./inv/ib_error_codes.md)
+    reason-extraction taxonomy).
+  - Tick-grid normalisation at submit (ADR-051) — orders now
+    conform to the contract tick grid (eliminated error 110 on
+    LSEETF).
 - **GAPS**
-  - Order types catalogue is `MKT` / `LMT` / `ADAPTIVE_MKT` only;
-    no `MOC` / `LOC` / `OPG` / `STP` / `STP_LMT` / `IOC` / `FOK`
-    for end-of-day rebalance or stop-driven strategies. INV-2
-    (order types) still MISSING per CONTEXT_INVENTORY §3.
-  - INV-3 (TIFs) MISSING; only `DAY` observed in wire runs.
-  - `IBBroker.replace()` raises `NotImplementedError` (M2-IB.4b
-    deferred). Phase 2 candidates that modify in-flight orders
-    would need it.
+  - **MOO (Market-On-Open) is not in the surface** (→ [OQ-035](./decisions/OPEN_QUESTIONS.md#oq-035--phase-2-order-type--tif-surface-moo--opg-for-market-on-open-execution)).
+    R-LEV-001 executes MOO/T+1; blive has no `OPG`-class order
+    type or opening-auction TIF. INV-2 (order types) / INV-3
+    (TIFs) remain MISSING.
+  - `IBBroker.replace()` still raises `NotImplementedError`
+    (M2-IB.4b deferred) — the VIX strategy's high turnover does
+    daily *full-book rotation*, not in-flight modification, so
+    replace() is likely still **not** required; confirm in
+    session 3.
 - **BLOCKED**
-  - None — the gaps land inside their own milestones when
-    triggered by a strategy that needs them.
-- **Phase 2 entry question.** Does Phase 2 require any new order
-  types (`MOC`/`LOC`/`OPG` for end-of-day rebalance, or working-order
-  modification via `replace()`), or is the current
-  `MKT`/`LMT`/`ADAPTIVE_MKT` surface sufficient given that the
-  candidate strategies (A3, A1, A1a) all rebalance daily at the
-  open per `signal_delay_bars=1`?
+  - None structurally — the gaps land in their own milestone when
+    a strategy needs them; OQ-035 is the scope decision.
+- **Phase-2 entry question.** Does Phase 2 add MOO/OPG + an
+  opening-auction TIF (OQ-035), and at which milestone — *before*
+  the VIX strategy can run, or as an M4 deliverable alongside it?
 
 ---
 
-## 4. Risk engine — ⚠ PARTIAL (M1-subset only; calibration data still pending)
+## 4. Risk engine — ⚠ PARTIAL (M1-subset + RC-10; incoming profile raises the stakes)
+
+**Δ since v0.1.** RC-10 (price sanity) is **now implemented**
+(ADR-050; INV-4 v0.2) — the M1-subset grew to RC-08 / RC-09 /
+**RC-10** / RC-12 / RC-13. M3.4's equity fix means the RiskEngine
+*can now trust* `AccountSnapshot.equity` (a latent bug, removed).
+But M3's capture was deliberately bounded and QQL3-non-filling, so
+it produced little P&L calibration data — that gap persists, and
+the incoming strategy sharpens it.
 
 - **READY**
-  - RC-08 (stale data) / RC-09 (market hours) / RC-12 (artefact
-    freshness) / RC-13 (kill-switch) implemented and exercised.
-  - RiskEngine no-bypass enforced via import-linter contract per
-    [ADR-008](./decisions/DECISIONS.md#adr-008--riskengine-no-bypass-architectural-enforcement) +
-    [ADR-004](./decisions/DECISIONS.md#adr-004--hexagonal-portsadapters-with-import-linter-enforcement).
-  - **Zero breaches across all four M2-IB.6 wire runs** — clean
-    operational signal.
+  - RC-08 / RC-09 / **RC-10** / RC-12 / RC-13 implemented and
+    exercised; no-bypass enforced ([ADR-008](./decisions/DECISIONS.md#adr-008--riskengine-no-bypass-architectural-enforcement)).
+  - Zero breaches across the M3 captures (clean — though partly
+    because the leveraged leg didn't trade).
+  - `AccountSnapshot.equity` is now the consolidated BASE total
+    (M3.4; [DD-1](./dd/domain_objects.md) v0.3) — sizing / risk
+    can finally read live equity correctly.
 - **GAPS**
-  - RC-01 (gross leverage) / RC-02..RC-07 (exposure / weight / daily
-    loss / per-strategy + global rate limits / concentration) not
-    implemented — full catalogue at [INV-4](./inv/risk_checks.md).
-  - RC-10 (price sanity) not implemented — would have caught the
-    EODHD 10× discrepancy at sizing time, before IB error 110.
-  - RC-11 (drawdown scaling) not implemented.
-  - Threshold calibration vs. actual P&L still post-M3 per
-    [PHASE_1_READINESS §5](./PHASE_1_READINESS.md).
+  - RC-01 (gross leverage) / RC-02..RC-07 (exposure / weight /
+    daily loss / per-strategy + global rate limits / concentration)
+    / RC-11 (drawdown scaling) still **not implemented** — full
+    catalogue at [INV-4](./inv/risk_checks.md).
+  - **Calibration data still thin** — the bounded M3 capture +
+    non-filling leveraged leg gave little live P&L to fit
+    thresholds against ([OQ-012](./decisions/OPEN_QUESTIONS.md#oq-012--parity-tolerance-bands-are-8-numbers-right) /
+    [PHASE_1_READINESS §5](./PHASE_1_READINESS.md)).
+  - **Sizing still off a synthetic $100k view** — the M3.4 fix
+    unblocked wiring live equity in, but that wiring is M4/M5.
 - **BLOCKED**
-  - Calibration data needs the empirical paper-mode window M3
-    will produce.
-- **Phase 2 entry question.** Does Phase 2 require the full
-  RC-01..RC-08 catalogue active (M4 deliverable), or does the
-  M1-subset (RC-08/09/12/13) stay sufficient given that OQ-031's
-  regime-dependent fill profile already constrains the QQL3 leg's
-  exposure naturally?
+  - Full-catalogue calibration needs a richer live (paper) window
+    than M3 produced.
+- **Phase-2 entry question.** Does the incoming strategy's
+  aggressive profile (vol 46.4%, MDD −33.9%, ~6000% turnover)
+  force RC-01 / RC-11 / RC-02..07 + live-equity sizing *before* it
+  runs, rather than M4's default ordering? The conservative
+  Phase-1 NAV slice ([ADR-020](./decisions/DECISIONS.md#adr-020--phase-1-nav-slice-510-of-total-cap-10):
+  5–10 %, cap 10 %) was sized for a technology-validation phase,
+  not a 46 %-vol strategy.
 
 ---
 
-## 5. Reconciliation (M5 territory) — ✗ BLOCKING for live cutover, ⚠ PARTIAL acceptable for paper
+## 5. Reconciliation (M5 territory) — ⚠ PARTIAL (mixed-currency + KB-7 stub done; native reconnect + persistence still M5/M4)
+
+**Δ since v0.1.** Both v0.1 gaps here moved. (a) **Mixed-currency
+P&L reconciliation is done** — M3.4 reconciled USD + GBP live
+*and found + fixed* the `AccountSnapshot.equity`-reads-base-sleeve
+bug (~10 % understatement). (b) **KB-7 `failure_modes` is now
+DRAFT** (FM-1 from the M3.5 chaos drill). The reconnect gap is now
+*documented* rather than unknown — but it is still a gap.
 
 - **READY**
-  - `IBBroker.connect()` invokes `reqAccountUpdatesAsync` — basic
-    startup snapshot.
-  - `AccountUpdate` 30 s diff-suppress emission timer per
-    [ADR-033](./decisions/DECISIONS.md#adr-033--accountupdate-emission-timer-30s-diff-suppress)
-    wire-validated.
-  - Crash-only design ([ADR-009](./decisions/DECISIONS.md#adr-009--crash-only-design-restart-path--cold-start-path))
-    means restart = cold-start with reconciliation on connect;
-    architectural shape is correct.
+  - Startup snapshot via `reqAccountUpdatesAsync`; 30 s
+    diff-suppress `AccountUpdate` timer ([ADR-033](./decisions/DECISIONS.md#adr-033--accountupdate-emission-timer-30s-diff-suppress));
+    crash-only restart = cold-start ([ADR-009](./decisions/DECISIONS.md#adr-009--crash-only-design-restart-path--cold-start-path)).
+  - **Mixed-currency reconciliation validated live** on
+    `DUP886336` (equity £1,003,855; DD-1 v0.3) — the v0.1
+    "exercised synthetically" gap is closed.
+  - **KB-7 FM-1** catalogues the Gateway-drop / daily-restart
+    failure mode + the external recovery path + reconciliation,
+    with `scripts/probe_ib_reconnect.py` as the fixture.
 - **GAPS**
-  - No continuous reconciliation loop (M5 deliverable).
-  - No persistent state — `InMemoryPersistence` only; SQLite
-    (per [ADR-006](./decisions/DECISIONS.md#adr-006--sqlite-for-persistence-in-v1) +
-    DD-4 `storage_schemas` MISSING) is the M4 cut.
-  - Daily 23:45 ET TWS-restart handled by operator-managed
-    manual relogin per
-    [ADR-040](./decisions/DECISIONS.md#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway);
-    not first-class in code.
-  - KB-7 (`failure_modes`) MISSING — chaos-test catalogue was an
-    M3 deliverable in the v0.1 plan but not yet authored.
-  - **Mixed-currency P&L reconciliation** (RETRO-M2-IB
-    Recommendation §4): QQL3 USD + IBTL/IBTM GBP-hedged
-    combination needs an account-snapshot smoke during a paper-mode
-    run with both legs at non-zero positions; M2-IB exercised the
-    fields synthetically.
+  - **No native disconnect detection / auto-reconnect** (KB-7
+    FM-1): `IBBroker.is_connected` stays stale-`True`; recovery
+    needs `disconnect()+connect()`; a Gateway restart raises
+    **IB 10141** (paper disclaimer) + a `clientId`-in-use
+    transient. RETRO-M3 recommends the *minimal* `disconnectedEvent`
+    fix for any multi-day run; the full watchdog + continuous
+    reconciliation loop is **M5**.
+  - **No persistent state** — `InMemoryPersistence` only; SQLite
+    ([ADR-006](./decisions/DECISIONS.md#adr-006--sqlite-for-persistence-in-v1) +
+    DD-4 `storage_schemas` MISSING) is the **M4** cut.
+  - Daily 23:45 ET restart still operator-managed manual relogin
+    ([ADR-040](./decisions/DECISIONS.md#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway)).
 - **BLOCKED**
-  - M5 work is forward-planned per TASK_REGISTRY M4+ sketch.
-- **Phase 2 entry question.** Does Phase 2 require M5
-  reconciliation in scope (continuous loop + persistent state +
-  daily-restart handling + KB-7 chaos catalogue) before live
-  cutover, or is paper-mode-with-process-restart-on-disconnect
-  still acceptable for the deployment-decision window M3 produces?
+  - M5 work forward-planned per TASK_REGISTRY M4+ sketch.
+- **Phase-2 entry question.** Is the **minimal `disconnectedEvent`
+  fix a Phase-2-entry precondition** (cross-cutting Q3), or does it
+  wait for M5 proper? The incoming strategy's daily MOO + ~42
+  switches/year raises the cost of a silently-missed reconnect
+  (a missed open = a missed rotation). Does Phase 2 entry also
+  require SQLite persistence (M4) for restart-safe position
+  tracking?
 
 ---
 
-## 6. Operations / observability — ⚠ PARTIAL (M7-deferred for the full stack)
+## 6. Operations / observability — ⚠ PARTIAL (M3.2 stubs + RunRecord sink exist; full stack still M4+)
+
+**Δ since v0.1.** v0.1 flagged INV-8 / INV-9 MISSING and "no
+fill-rate dashboard". M3.2 produced **INV-8 `metrics` + INV-9
+`alerts` DRAFT stubs** and the per-run `RunRecord` results sink
+(`runtime/m3_2_record.py` → `~/.blive/data/m3_2_window/runs.jsonl`)
+capturing fill-rate, regime-flip count, 2161 cap-binding, breach
+count, FSM-trace coverage. So a minimal *capture* surface exists
+(not a live dashboard).
 
 - **READY**
-  - `ConnectionStatus` / `ArtefactFreshnessWarning` / `AccountUpdate`
-    / `RiskBreach` event types implemented per [INV-5](./inv/domain_events.md)
-    + [DD-2 v0.2](./dd/event_schemas.md).
-  - `IBBroker` subscribes to both `trade.statusEvent` and global
-    `ib.errorEvent` channels ([INV-14 v0.7](./inv/ib_error_codes.md)
-    §"Reason-extraction taxonomy") — load-bearing fix from M2-IB.6.2.
-  - Daily NDJSON trade tape *concept* per REQUIREMENTS §6.3.
+  - `ConnectionStatus` / `ArtefactFreshnessWarning` /
+    `AccountUpdate` / `RiskBreach` events ([INV-5](./inv/domain_events.md) +
+    [DD-2](./dd/event_schemas.md)); dual-channel `trade.statusEvent`
+    + `ib.errorEvent` subscription.
+  - **INV-8 / INV-9 DRAFT stubs + the RunRecord sink** — the
+    empirical-window metrics/alerts are catalogued and captured.
 - **GAPS**
-  - Daily NDJSON trade tape unverified at scale (M5 / KB-7
-    territory).
-  - No structured logging stack (M4 deliverable).
-  - INV-8 (metrics) MISSING; INV-9 (alerts) MISSING.
-  - No Prometheus / Grafana; no Web UI (M6 / M7 deliverables).
-  - No fill-rate dashboard — load-bearing for empirical OQ-031
-    measurement during M3 paper-mode window.
+  - No structured-logging stack (M4); no Prometheus / Grafana, no
+    Web UI (M6 / M7); the RunRecord sink is a file, not a live
+    fill-rate dashboard.
+  - Daily NDJSON trade tape still unverified at scale (M5 / KB-7).
 - **BLOCKED**
-  - M6 / M7 deliverables forward-planned per TASK_REGISTRY M4+
-    sketch.
-- **Phase 2 entry question.** What observability is *load-bearing*
-  for Phase 2 entry (e.g., fill-rate dashboard for OQ-031;
-  mixed-currency P&L visibility) versus nice-to-have (full
-  Prometheus / Grafana stack), and which subset must M3 ship as a
-  precondition for the OQ-031 decision?
+  - M4 / M6 / M7 deliverables forward-planned.
+- **Phase-2 entry question.** What observability is *load-bearing*
+  for the incoming strategy's higher activity (per-open fill-rate,
+  turnover, regime-switch visibility, mixed-currency P&L) versus
+  nice-to-have (full Prometheus / Grafana) — and does the
+  RunRecord sink suffice for Phase-2 entry, or does M4 pull
+  structured logging forward?
 
 ---
 
-## 7. Regulatory / compliance — ⚠ PARTIAL (PRIIPs covered; CFD / cross-exchange surfaces not yet)
+## 7. Regulatory / compliance — ⚠ PARTIAL (Professional-vs-retail is the gating choice; incoming book is all US-domiciled)
+
+**Δ since v0.1.** The PRIIPs picture sharpened into the trilemma
+(OQ-032) — a **retail** phenomenon. **The operator will stay
+retail near-term** (not currently elective-professional-eligible),
+so PRIIPs **binds**: the incoming strategy's entirely-US-domiciled
+universe (TQQQ / VXX / IEF) must be served by UK-retail-eligible
+UCITS substitutes. (Professional classification — route A — would
+lift the KID block and is the cleaner path if/when eligible;
+deferred.)
 
 - **READY**
-  - PRIIPs / KID reach catalogued in [KB-9 §5.5](./kb/uk_regulatory.md);
-    Phase 1 universe substituted per
-    [ADR-047](./decisions/DECISIONS.md#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043).
-  - HMRC trade-by-trade record requirement (5+ years) noted in
-    KB-9.
-  - MiFID-II audit-trail shape satisfied by event-log + hash-chained
-    audit (KB-9).
-  - Deployment target codified: Windows native IB Gateway per
-    [ADR-040](./decisions/DECISIONS.md#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway).
+  - PRIIPs / KID reach catalogued ([KB-9 §5.5](./kb/uk_regulatory.md));
+    Phase-1 universe substituted (ADR-047). HMRC + MiFID-II
+    audit-trail shape satisfied. Deployment target codified
+    (ADR-040).
 - **GAPS**
-  - Trading-vs-investment classification awaiting professional
-    confirmation (KB-9 — operator-side, off-blive).
-  - No CFD-specific section in KB-9 — relevant only if Phase 2
-    reactivates the IG bridge or introduces another CFD broker.
-  - Cross-exchange / non-UK-account surfaces not catalogued.
-  - MiFID II Professional Client classification path not pursued
-    (per ADR-047 §"Alternatives Considered" item 2; OQ-031 Option
-    2). Operator declined at M2-IB.6.1; revisit if OQ-031 forces
-    it.
+  - **Route B (retail) is active**, so the US-domiciled universe is
+    PRIIPs-blocked and needs UCITS substitutes: IEF → IBTM (solved);
+    TQQQ → a 1× Nasdaq-100 UCITS + the OQ-032 margin path; the
+    **VXX-replacement mid-term vol product must itself be a
+    UK-retail-eligible UCITS** — diligence required (→ OQ-034).
+  - **Professional-Client classification (route A; OQ-032 Option 2)
+    is deferred** — it would lift the PRIIPs/KID block (a
+    *retail*-only requirement) and let the US originals trade
+    directly (also unlocking `priceManagementOff` for the PMA cap),
+    but the operator is **not currently eligible** (MiFID II
+    2-of-3) and would lose retail protections (FSCS, negative-
+    balance protection, Ombudsman). Revisit if eligibility changes.
+  - No CFD-specific KB-9 section; cross-exchange / non-UK-account
+    surfaces uncatalogued (unchanged from v0.1).
 - **BLOCKED**
-  - Operator's accountant / lawyer review (off-blive).
-  - Pro Client classification decision (operator).
-- **Phase 2 entry question.** Are there other regulatory surfaces
-  Phase 2 introduces (cross-exchange routing? CFD via reactivated
-  IG adapter? non-UK-account scenarios? MiFID II PCC classification
-  if OQ-031 → Option 2?) that need pre-flight diligence beyond what
-  KB-9 §5.5 covers today?
+  - Operator's accountant / lawyer review (off-blive);
+    Pro-Client + Cash→Margin account decisions (operator).
+- **Phase-2 entry question.** On the active retail path: does a
+  UK-retail-eligible 1× Nasdaq-100 UCITS **and** a mid-term vol
+  UCITS exist that clear PRIIPs / complex-product diligence (beyond
+  KB-9 §5.5) and the PMA cap?
 
 ---
 
-## 8. OQs that gate Phase 2 entry — ⚠ PARTIAL (5 OPEN; 1 deferred-to-M3 by operator)
+## 8. OQs that gate Phase 2 entry — ⚠ PARTIAL (8 OPEN: 4 carried + OQ-032 + 3 new)
 
-The five OPEN OQs in [KB-11 v0.4](./decisions/OPEN_QUESTIONS.md):
+**Δ since v0.1.** OQ-031 **resolved** (ADR-052). OQ-032 **raised**
+(the central Phase-2 decision). This audit raises **three new OQs**
+(OQ-033 / OQ-034 / OQ-035). The OPEN set is now eight.
+
+The eight OPEN OQs in [KB-11 v0.6](./decisions/OPEN_QUESTIONS.md):
 
 | OQ | Question | Target | Phase-2-entry posture |
 |----|----------|--------|----------------------|
-| **[OQ-012](./decisions/OPEN_QUESTIONS.md#oq-012--parity-tolerance-bands-are-8-numbers-right)** | Parity tolerance bands — are §8 numbers right? | calibrate at M7 | Acceptable to defer; M7 is its native milestone. M3's empirical paper-mode window seeds the calibration data. |
-| **[OQ-023](./decisions/OPEN_QUESTIONS.md#oq-023--forgefolio-read-only-integration-with-blive-event-log)** | ForgeFolio read-only integration | post-M8 | Confirmed orthogonal to Phase 2 entry. |
-| **[OQ-028](./decisions/OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1)** | Agentic memory framework / tooling for L0+L1 | before L0+L1 implementation | Default per OQ-029: post-G4. Phase 2 entry IS the G4-equivalent; needs at least a working answer. |
-| **[OQ-029](./decisions/OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1)** | When to implement L0+L1 | at or before G4 gate | Same as OQ-028. Default "post-G4" implies decision happens at Phase 2 entry. |
-| **[OQ-031](./decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account)** | Phase 1 deployment under PMA-bound retail account | before Phase 1 live cutover (G3-IB → G4) | Operator-deferred to M3. Working default: Option 1 for ~5 trading days then revisit. **Load-bearing for the M3 plan.** |
+| [OQ-012](./decisions/OPEN_QUESTIONS.md#oq-012--parity-tolerance-bands-are-8-numbers-right) | Parity tolerance bands | calibrate at M7 | Defer; M7 is native. M3's thin capture means Phase-2 paper data seeds it. |
+| [OQ-023](./decisions/OPEN_QUESTIONS.md#oq-023--forgefolio-read-only-integration-with-blive-event-log) | ForgeFolio integration | post-M8 | Orthogonal to Phase 2 entry. |
+| [OQ-028](./decisions/OPEN_QUESTIONS.md#oq-028--which-agentic-memory-framework--tooling-for-l0l1) | Agentic memory framework (L0/L1) | before L0/L1 impl | **Due now** — Phase 2 entry *is* the post-G4 trigger. |
+| [OQ-029](./decisions/OPEN_QUESTIONS.md#oq-029--when-to-implement-l0l1) | Timing of L0/L1 | at/before G4 | **Due now** — same trigger; reaffirm or commit. |
+| [OQ-032](./decisions/OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) | Leverage-leg redesign (the trilemma) | Phase 2 entry | **Load-bearing — the central session-3 decision.** |
+| [OQ-033](./decisions/OPEN_QUESTIONS.md#oq-033--phase-2-vix-strategy-ux1--ux6-vix-futures-term-structure-data-sourcing) | UX1/UX6 VIX-futures data sourcing | Phase 2 entry | Load-bearing *if* R-LEV-001 is adopted. |
+| [OQ-034](./decisions/OPEN_QUESTIONS.md#oq-034--phase-2-vix-strategy-uk-retail-tradability-of-the-tqqq--vxx--ief-universe) | Incoming universe UK-retail tradability (VXX) | Phase 2 entry | Load-bearing *if* R-LEV-001 is adopted. |
+| [OQ-035](./decisions/OPEN_QUESTIONS.md#oq-035--phase-2-order-type--tif-surface-moo--opg-for-market-on-open-execution) | MOO/OPG order-type + TIF surface | Phase 2 entry | Scope decision; impl may be M4. |
 
-- **READY**
-  - OQ catalogue maintained; all five OPEN OQs have target
-    resolution dates and proposed defaults / option lists.
-  - Append-only discipline preserved (no edits to past OQ bodies).
-- **GAPS**
-  - OQ-031 has four resolution options but no decision; the M3
-    plan's shape depends on which option dominates.
-  - OQ-028 / OQ-029 have proposed defaults but no commitment;
-    Phase 2 entry needs at least the default reaffirmed.
-- **BLOCKED**
-  - OQ-031 — operator deferred to M3.
-  - OQ-012 — needs the empirical paper-mode data M3 will produce.
-  - OQ-023 — post-M8 by design.
-- **Phase 2 entry question.** Of the five OPEN OQs, which must be
-  resolved *before* Phase 2 entry (load-bearing for the M3 plan)
-  versus which can be carried into Phase 2 substrate work as
-  scheduled work items?
+- **READY** — every OPEN OQ has a target date + options / proposed
+  default; append-only discipline preserved.
+- **GAPS** — OQ-032 + OQ-033/034/035 are unresolved and *coupled*
+  (they all turn on which Phase-2 strategy is chosen); OQ-028/029
+  need at least a reaffirmed default.
+- **BLOCKED** — OQ-032/033/034 are operator decisions for session 3.
+- **Phase-2 entry question.** Of the eight, which must be resolved
+  *in session 3* before the Phase-2 plan can be drafted
+  (OQ-032 certainly; OQ-033/034/035 if R-LEV-001 is the target)
+  versus carried into Phase 2 as scheduled work (OQ-012, OQ-023)?
 
 ---
 
 ## Verdict
 
-**For drafting the M3 plan at milestone-level granularity**:
-**READY**, conditional on the five cross-cutting questions above
-becoming the agenda of the M3 plan-drafting session. The
-substrate is internally consistent post-M2-IB.6 close; no
-PROPOSED ADRs remain in the working tree; no STABLE artefact has
-gone STALE.
+**For drafting the Phase 2 (M4 .. M8) plan in session 3**:
+**READY at milestone-headline granularity, conditional** on the
+six cross-cutting questions becoming session 3's agenda. The
+substrate is internally consistent post-M3-close; no PROPOSED
+ADRs; no STABLE artefact has gone STALE; KB-2 / KB-3 are STABLE
+v1.0 (Phase-1 surface — note they re-open to STALE the moment
+Phase 2 introduces VIX futures / a new account type, per their own
+scope caveat).
 
-**For executing M3 / Phase 1 deployment decision**: **READY for
-the empirical paper-mode window** (Recommendation §1 of
-RETRO-M2-IB); **NOT READY for live cutover** until OQ-031 is
-resolved.
+**For drafting Phase 2 at detailed deliverable granularity**:
+**NOT READY until session 3 resolves the strategy question.**
+Almost every M4+ deliverable's shape depends on the OQ-032 /
+OQ-034 outcome:
 
-**For drafting Phase 2 (M4..M8) at milestone granularity**:
-**NOT READY**. Phase 2 detail depends on M3 outcomes:
-- the OQ-031 resolution shapes whether Phase 2 expands to A1 / A1a
-  or stays single-strategy on A3;
-- the empirical fill-rate / parity envelope from M3 calibrates
-  Phase 2's risk-engine thresholds and parity-diagnostic
-  acceptance bands;
-- the EODHD-vs-IB reconciliation either lands in M3 (M7 work
-  pulled forward) or sits in M7 proper, shifting Phase 2's
-  milestone weights.
+- **Route B (retail) is the active path** (operator not currently
+  Professional-eligible; route A deferred). So if Phase 2 **adopts
+  R-LEV-001**, M4+ must: source EODHD VIX-futures data (OQ-033);
+  build a UK-retail UCITS universe — a 1× Nasdaq-100 UCITS (+ the
+  OQ-032 margin path to recover ~3×), IBTM, and a **mid-term vol
+  UCITS** replacing VXX (OQ-034); add MOO/OPG order types (OQ-035);
+  and stand up the full RC catalogue for a 46 %-vol book;
+- the **OQ-032 retail lever** is itself a session-3 sub-decision —
+  margin-on-1×-Nasdaq-UCITS (preserve ~3×; needs Cash → Margin +
+  no-PMA validation + financing parity, KB-6 §4) vs de-lever to 1×
+  vs restructure;
+- if Phase 2 **redesigns A3** instead of adopting R-LEV-001, the
+  universe and parity envelope shift but the same retail-lever
+  question applies.
 
-The plan-drafting session can sketch M4..M8 to milestone-headline
-level (as the Phase 1 plan did at the equivalent point), but
-detailed M4 deliverables should wait until M3 ships its first
-empirical artefacts.
+**The single highest-leverage operator-side prerequisite is now the
+Cash → Margin account conversion** — it gates the
+leverage-preserving margin-on-1×-UCITS sub-path (the paper account
+`DUP886336` is Cash + GBP-base) and has real lead time; surface it
+before session 3. (Route A / Professional Client is deferred until
+the operator is eligible; it remains the cleaner path and is kept
+documented for revisiting.)
+
+The plan-drafting session can sketch M4 .. M8 to milestone-headline
+level (as Phase 1 did at the equivalent point), but detailed M4
+deliverables should wait until the strategy question is answered.
+
+## New OQs raised by this audit
+
+Appended to [KB-11](./decisions/OPEN_QUESTIONS.md) (v0.5 → v0.6),
+all targeting **Phase 2 entry (M3 → M4 boundary / session 3)**:
+
+- **OQ-033** — Phase-2 VIX strategy: UX1 / UX6 VIX-futures
+  term-structure data **from EODHD** (open part: whether EODHD's
+  coverage + history suffice; IB CFE futures subscription as the
+  fallback). No sfera / static-parquet handoff.
+- **OQ-034** — Phase-2 VIX strategy: universe & instrument design
+  — route A (Professional Client → US originals tradeable) vs
+  route B (retail → UCITS substitutes); the **VXX leg replaced by
+  a mid-term 3-/6-month vol product** either way (design choice).
+  Cross-links OQ-032 + KB-9 §5.5.
+- **OQ-035** — Phase-2 order-type & TIF surface: MOO / OPG (+
+  opening-auction TIF) for Market-On-Open execution (INV-2 / INV-3
+  MISSING).
+
+The **Cash → Margin account-type** decision (and the deferred
+**Professional-Client** route) are *not* raised as separate OQs —
+both are already homed inside OQ-032 (SSOT;
+[CONTEXT_PROTOCOL §2.1](../CONTEXT_PROTOCOL.md)) as its Option 1 and
+Option 2 respectively. They are surfaced in this audit as the
+load-bearing Phase-2-entry operator decisions, not duplicate
+questions.
 
 ## Recommended next steps
 
-1. ✓ **Save this audit** as substrate artefact (this file).
-2. **Update [`CONTEXT_INVENTORY.md`](../CONTEXT_INVENTORY.md) §10** —
-   tick "Phase 2 readiness audit" complete with link to this
-   file; add "M3 plan-drafting session" as the next-front-of-queue
-   item; refresh the status banner.
-3. **Replace [`NEXT_PROMPT.md`](../NEXT_PROMPT.md) v0.8 → v0.9** —
-   kickoff prompt for the M3 plan-drafting session, referencing
-   the five cross-cutting questions above as the session's
-   agenda.
-4. **Re-audit at Phase 2 entry / G4 gate** — confirm what was
-   true on 2026-05-06 vs what changed during M3.
+1. ✓ **Save this audit refresh** (this file, v0.2) + the three new
+   OQs in KB-11.
+2. **Update [`CONTEXT_INVENTORY.md`](../CONTEXT_INVENTORY.md)** §10
+   (mark the readiness-audit refresh complete; set session 3 —
+   Phase-2 plan-drafting — as front-of-queue) + the banner + the
+   KB-11 row (v0.6, 8 OPEN).
+3. **Replace [`NEXT_PROMPT.md`](../NEXT_PROMPT.md) v1.5 → v1.6** —
+   kickoff for the **Phase-2 plan-drafting session** (session 3):
+   operator resolves OQ-032 + OQ-033/034/035 (and reaffirms
+   OQ-028/029) with the R-LEV-001 notebook as input; agent then
+   drafts the Phase-2 plan in `TASK_REGISTRY.md`.
+4. **(Operator-side, before session 3)** on the active retail
+   path, the **Cash → Margin** account conversion — it gates the
+   leverage-preserving margin-on-1×-UCITS sub-path and has lead
+   time. (Professional classification deferred until eligible.)
+5. **Re-audit at Phase 2 entry / first M4 freeze** — confirm what
+   was true on 2026-06-06 vs what changed.
+
+> **Freeze ceremony note.** The §6.4 M3 freeze is **already done**
+> — `docs/_freezes/M3-CONTEXT_INVENTORY.md` exists and the
+> `M3-close` git tag is placed (commit `00c9116` / `1758a96`). No
+> freeze action remains for this session.
 
 ## Cross-References
 
 - [PHASE_1_READINESS](./PHASE_1_READINESS.md) — sibling artefact;
   same eight-dimension shape.
-- [RETRO-M2-IB](./retros/M2-IB_retrospective.md) — the
-  load-bearing input that informed each dimension.
-- [TASK_REGISTRY](../TASK_REGISTRY.md) — Phase 1 plan and the
-  M4+ sketch this audit feeds.
+- [RETRO-M3](./retros/M3_retrospective.md) — the load-bearing
+  input that informed each dimension's Δ.
+- [RETRO-M2-IB](./retros/M2-IB_retrospective.md) — informed v0.1.
+- [TASK_REGISTRY](../TASK_REGISTRY.md) — Phase 1 plan + the M4+
+  sketch this audit feeds into session 3.
 - [CONTEXT_PROTOCOL §8.3.2](../CONTEXT_PROTOCOL.md) — the
   three-session phase-boundary protocol that frames this audit.
-- [KB-11 v0.4](./decisions/OPEN_QUESTIONS.md) — open-questions
-  catalogue.
-- [INV-14 v0.7](./inv/ib_error_codes.md) — IB error / warning
-  catalogue including the four-run PMA-cap validation matrix
-  that drives Question 1 + Dimension 1.
-- [ADRs 040–049](./decisions/DECISIONS.md) — the M2-IB ADR ladder.
+- [KB-11 v0.6](./decisions/OPEN_QUESTIONS.md) — open-questions
+  catalogue (OQ-032 + OQ-033/034/035).
+- [OQ-032](./decisions/OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) —
+  the leverage trilemma; the central Phase-2 decision.
+- [ADRs 050–052](./decisions/DECISIONS.md) — the M3 ADR ladder
+  (unit-of-quote / tick-grid / OQ-031-Option-1).
 
 ## Changelog
 
-- **v0.1 (2026-05-06)** — initial audit at the gate before the
-  M3 / Phase 2 plan-drafting session, per
-  [CONTEXT_PROTOCOL §8.3.2](../CONTEXT_PROTOCOL.md). Eight
-  dimensions evaluated against the M2-IB.6-close commit state.
-  Five cross-cutting questions raised as the agenda for the
-  plan-drafting session. No new ADRs raised; no new OQs raised
-  (OQ-031 already covers the PMA-cap deployment question).
+- **v0.1 (2026-05-06)** — initial audit at the `M2-IB.6-close`
+  gate, *before M3 ran*. Eight dimensions evaluated against the
+  M2-IB.6 wire outcomes; five cross-cutting questions raised as
+  the agenda for the (then-upcoming) M3 plan-drafting session. No
+  new ADRs / OQs raised.
+- **v0.2 (2026-06-06)** — **refresh against the real M3 outcomes**
+  (G4 PASSED). v0.1's five questions retired (answered by M3;
+  table added). Eight dimensions re-audited with a **Δ since v0.1**
+  note each, folding in the leverage trilemma (OQ-032), the M3.4
+  equity-bug fix, the M3.5 reconnect gap (KB-7 FM-1), the ADR-052
+  structural QQL3 non-fill, and the ADR-050/051 unit-of-quote +
+  tick-grid fixes. The incoming Phase-2 strategy candidate
+  (R-LEV-001 VIX term-structure rotation) folded in; **three new
+  OQs raised** (OQ-033 VIX-futures data / OQ-034 universe
+  tradability / OQ-035 MOO-OPG order types), all targeting Phase 2
+  entry. Six new cross-cutting questions = session 3's agenda.
+  **Operator review (2026-06-06)** reframed the leverage question:
+  the trilemma is a *retail-Cash* phenomenon. Two routes were
+  weighed — **(A) MiFID II Professional Client** (PRIIPs is
+  retail-only → trade the US originals; leverage via the 3× ETP) vs
+  **(B) retail substitutes** (margin-on-1×-UCITS + a UCITS
+  universe) — and the operator confirmed they will **stay retail
+  near-term** (not currently elective-professional-eligible), so
+  **route B is the active path** and route A is deferred (revisit
+  on eligibility). The live OQ-032 sub-decision is then the retail
+  leverage lever (margin-on-1×-Nasdaq-UCITS vs de-lever vs
+  restructure); **Cash → Margin** is the top operator prerequisite.
+  VXX → a mid-term 3-/6-month vol product (design choice);
+  VIX-futures data from EODHD (no sfera / parquet). OQ-028/029
+  (L0/L1) noted as lowest-stakes (default: reaffirm deferral).
