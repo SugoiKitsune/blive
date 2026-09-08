@@ -489,6 +489,43 @@ def _pg_conn_str(sfera_root: Path | None = None) -> str:
     )
 
 
+def _sleeve_universe(db_key: str, sfera_root: Path | None = None) -> set[str]:
+    """Every identifier this strategy has EVER targeted (its own asset universe), from strategy.target_weights.
+    Used to attribute a HELD position on a shared/blended account back to the sleeve that owns it — so a held
+    leg no longer in today's target (a rotated-away name) is still recognised as belonging to its sleeve, and
+    the per-sleeve buy-and-hold decision is robust. CASH is not an asset. Empty on any DB error (safe fallback)."""
+    try:
+        import psycopg
+        with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT identifier FROM strategy.target_weights WHERE strategy=%s", (db_key,))
+            return {r[0] for r in cur.fetchall() if r[0] and r[0] != "CASH"}
+    except Exception:  # noqa: BLE001 - fall back to today's sym_origin attribution
+        return set()
+
+
+def _sleeve_flipped(db_key: str, ref_date, today_map: dict, sfera_root: Path | None = None) -> bool:
+    """Did THIS strategy's OWN target change vs its previous stored date? The robust per-sleeve flip signal:
+    it compares the strategy's own (identifier -> rounded weight) map today against the most recent prior date
+    in strategy.target_weights — completely independent of the shared/blended account (so R02 and R04 sharing a
+    US-ETF universe is a non-issue). A stable single-asset sleeve (R02={TQQQ:1}, R04={BIL:1} every day) is NOT
+    flipped -> HELD; a book whose composition/gate changed (R05) IS flipped -> rebalanced. No prior history ->
+    not flipped (hold). DB error -> flipped (degrade to the old full-rebalance rather than freeze trading)."""
+    try:
+        import psycopg
+        with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("SELECT MAX(date) FROM strategy.target_weights "
+                        "WHERE strategy=%s AND deprecated_at IS NULL AND date < %s", (db_key, ref_date))
+            prev = cur.fetchone()[0]
+            if prev is None:
+                return False
+            cur.execute("SELECT identifier, weight FROM strategy.target_weights "
+                        "WHERE strategy=%s AND date=%s AND deprecated_at IS NULL AND weight<>0", (db_key, prev))
+            prev_map = {r[0]: round(float(r[1]), 4) for r in cur.fetchall() if r[0] != "CASH"}
+        return prev_map != today_map
+    except Exception:  # noqa: BLE001 - can't compare -> don't silently freeze; fall back to rebalance
+        return True
+
+
 # per-symbol EODHD price currency (e.g. GBX for LSE pence) — used to convert the sfera EOD close to USD.
 _PRICE_CCY: dict[str, str] = {}
 _FX_CACHE: dict[str, float] = {}
@@ -676,6 +713,8 @@ async def _run(args: argparse.Namespace) -> int:
             plan = json.loads(args.portfolio)
             combined: dict[str, Decimal] = {}
             sym_origin: dict[str, list[str]] = {}   # which strategy contributed each symbol (per-order attribution)
+            sleeve_universes: dict[str, set] = {}   # code -> assets it has EVER targeted (held-leg attribution)
+            sleeve_flip: dict[str, bool] = {}       # code -> did ITS OWN target change vs prev date (per-sleeve flip)
             total_budget = Decimal("0")
             oldest: date | None = None
             labels: list[str] = []
@@ -683,6 +722,9 @@ async def _run(args: argparse.Namespace) -> int:
                 code_i, dbk_i = _resolve_code(str(item["strategy"]))
                 b = Decimal(str(item["budget"]))
                 w_i, d_i, _ = _load_one(dbk_i)
+                _tmap = {s: round(float(wt), 4) for s, wt in w_i.items() if wt != 0 and s != "CASH"}
+                sleeve_universes[code_i] = _sleeve_universe(dbk_i, Path(args.sfera_root)) or set(_tmap)
+                sleeve_flip[code_i] = _sleeve_flipped(dbk_i, d_i, _tmap, Path(args.sfera_root))
                 for sym, wt in w_i.items():
                     combined[sym] = combined.get(sym, Decimal("0")) + b * wt
                     if wt != 0 and code_i not in sym_origin.get(sym, []):
@@ -720,6 +762,9 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"\nFAILED: {exc}")
             return 2
         sym_origin = {s: [code] for s in weights}   # single strategy -> every symbol attributes to it
+        _tmap = {s: round(float(w), 4) for s, w in weights.items() if w != 0 and s != "CASH"}
+        sleeve_universes = {code: (_sleeve_universe(db_key, Path(args.sfera_root)) or set(_tmap))}
+        sleeve_flip = {code: _sleeve_flipped(db_key, signal_date, _tmap, Path(args.sfera_root))}
 
     _ensure_eu_instruments(weights, Path(args.sfera_root))   # register EU equities (R05) in _CATALOGUE before sizing
     tradable_targets, cash_residual = _print_weights(weights, signal_date, source)
@@ -995,27 +1040,87 @@ async def _run(args: argparse.Namespace) -> int:
                   broker=broker_label, base_ccy=base_ccy, mode=("submit" if args.submit else "dry-run"),
                   order_type=args.order_type, limit_band=float(args.limit_band),
                   aum_usd=float(pot_usd), fx_rate=float(fx), fx_applied=bool(fx_applied))
-    hold_mode = size_basis == "holdings" or (args.rebalance_band and args.rebalance_band > 0)
-    if hold_mode and candidate_orders:
-        target_assets = {s for s, w in target_weights.items() if w != 0}
-        # Only THIS sleeve's holdings — filter `s in weights` exactly as the sizer's current_positions does
-        # (line ~921). Foreign positions on the shared account (R02's TQQQ / R04's BIL when running R05) must
-        # NOT count as "held", else target != held on every run -> the guard never fires -> phantom rebalance.
-        held_assets = {s for s, p in positions.items() if p.quantity != 0 and s in weights}
-        if target_assets == held_assets:                          # no signal / asset-set change → HOLD
-            drift = max((abs(o.quantity * prices.get(_id_by_inst.get(o.instrument, o.instrument.symbol), Decimal("0")))
-                         for o in candidate_orders), default=Decimal("0"))
-            print("\n  HOLDING — buy-and-hold: USD AUM allocated once, positions ride the market.")
-            print(f"  No signal flip (asset set unchanged) -> NO rebalance. Largest would-be drift trade "
-                  f"${float(drift):,.0f} is NOT placed — only a signal flip trades.")
-            print("  (FX not applied to sizing — pure USD holdings MV; FX handled separately in the paper account.)")
-            _emit_orders_json("HOLD", "no signal flip (asset set unchanged)",
+    # Per-sleeve buy-and-hold (ALWAYS ON): each ALLOCATED strategy sleeve holds its positions and trades ONLY
+    # when ITS OWN asset set flips. On a shared/blended account, one sleeve flipping (R05's monthly rotation)
+    # must NOT drag an UNCHANGED sleeve (R02/R04) into a drift rebalance — that was the phantom-churn bug (the
+    # old guard compared the WHOLE blended book, so any single flip rebalanced everything, exceeding each
+    # sleeve's fixed allocation). We attribute every held leg + every candidate order to its sleeve (by that
+    # sleeve's ever-targeted universe), then DROP orders that belong ONLY to sleeves whose asset set is
+    # unchanged. Invariant: an allocated sleeve never rebalances on price drift — its capital is fixed; the
+    # position rides the market until a genuine signal flip. --no-sleeve-hold opts out (full true-up each run).
+    def _sleeves_of(sym: str) -> set:
+        # attribute an ORDER to its sleeve: today's target (sym_origin) is unambiguous (one strategy targets a
+        # given asset today, so a held+targeted TQQQ is R02's, not R04's); fall back to the ever-traded universe
+        # only for a rotated-away leg that no sleeve targets today.
+        hit = set(sym_origin.get(sym, []))
+        return hit or {c for c, u in sleeve_universes.items() if sym in u}
+    flipped = {c for c, f in sleeve_flip.items() if f}            # sleeves whose OWN target changed vs prev date
+    hold_sleeves = set(sleeve_flip) - flipped
+    # HOLD must MEAN "the account already matches the target", not merely "the signal didn't flip". Those are
+    # only the same thing if the sleeve was ever fully ESTABLISHED. R05 never was: SWED-A.ST was BLOCKED at the
+    # resolver from day one and AKRBP/TTE/HFD were never (re)bought, so ~26% of a 150% target gross has been
+    # missing since inception — and because the target never flipped, the sizer computed the catch-up BUY every
+    # single day and this guard threw it away every single day. The book can never converge.
+    # --rebalance-band (a fraction of AUM) is the discriminator the help text always promised but which was
+    # never actually read anywhere: hold the TINY moves (price drift — the cross-sleeve churn this guard exists
+    # to stop), trade the material ones (an unestablished or badly-off leg). band<=0 keeps the previous
+    # drop-everything behaviour so nothing changes for callers that don't opt in.
+    # The band is a WEIGHT-POINT tolerance: how far a position may sit from its target as a fraction of the
+    # book. An order's notional ÷ AUM IS that weight deviation, so `move_usd >= band × AUM` reads directly as
+    # "this leg is more than `band` of the book away from where it should be". Sensible values are SMALL —
+    # 0.005 = half a percentage point of weight. (0.05 would be five points, larger than the entire target
+    # position in most R05 names — AKRBP 7.4%, TTE 4.4%, HFD 2.8% — and would go on suppressing exactly the
+    # establishment orders this fix exists to release.)
+    _band = float(getattr(args, "rebalance_band", 0.0) or 0.0)
+    _sizing_usd = float(size_equity) if size_equity else float(pot_usd)
+    _band_usd = _sizing_usd * _band
+
+    def _is_material(sym: str, order) -> bool:
+        """True if this order CORRECTS a real gap vs target (trade it) rather than trimming drift (hold)."""
+        try:
+            move_usd = abs(float(order.quantity) * float(_px_usd(sym)))
+        except Exception:
+            return True                                           # unpriceable -> never silently skip
+        return move_usd >= _band_usd
+    if candidate_orders and hold_sleeves and not getattr(args, "no_sleeve_hold", False):
+        kept: list[Order] = []
+        dropped: list = []
+        for o in candidate_orders:
+            osym = _id_by_inst.get(o.instrument, o.instrument.symbol)
+            osl = _sleeves_of(osym)
+            if osl and osl <= hold_sleeves:                       # order belongs ONLY to unchanged sleeve(s)
+                if _band > 0 and _is_material(osym, o):           # a real gap vs target -> TRADE it
+                    kept.append(o)
+                    continue
+                dropped.append((osym, o))                         # within band (or no band) -> genuine buy-and-hold
+            else:
+                kept.append(o)
+        _bandtxt = (f"within ±{_band:.2%} of book weight (${_band_usd:,.0f})" if _band > 0
+                    else "no --rebalance-band set (drop-everything mode)")
+        for osym, o in dropped:
+            print(f"  HOLD {osym} [{'/'.join(sorted(_sleeves_of(osym))) or '?'}]: sleeve unchanged and position "
+                  f"{_bandtxt} -> {o.side.value} {float(o.quantity):.0f} NOT placed — drift, not a gap.")
+        if _band > 0:
+            for o in kept:
+                ksym = _id_by_inst.get(o.instrument, o.instrument.symbol)
+                ksl = _sleeves_of(ksym)
+                if ksl and ksl <= hold_sleeves:
+                    print(f"  TRUE-UP {ksym} [{'/'.join(sorted(ksl))}]: sleeve unchanged BUT position is off target "
+                          f"by more than ±{_band:.2%} of book weight -> {o.side.value} {float(o.quantity):.0f} "
+                          f"PLACED (establish/correct, not drift).")
+        candidate_orders = kept
+        if dropped and not candidate_orders:                      # everything held -> emit a clean HOLD decision
+            print(f"\n  HOLDING — sleeves {sorted(hold_sleeves)} unchanged AND every position {_bandtxt} "
+                  f"-> account is in line with target, NO rebalance.")
+            _emit_orders_json("HOLD", f"per-sleeve buy-and-hold: {sorted(hold_sleeves)} unchanged, "
+                                      f"all positions {_bandtxt}",
                               _order_summary_rows(target_weights, prices, positions, [], sym_origin,
-                                                  limit_band=float(args.limit_band), is_limit=is_limit),
-                              drift_usd=float(drift), **_emeta)
+                                                  limit_band=float(args.limit_band), is_limit=is_limit), **_emeta)
             await broker.disconnect()
             return 0
-        print(f"\n  Signal flip: asset set {sorted(held_assets)} -> {sorted(target_assets)} — rebalancing to new target.")
+    if flipped:
+        print(f"\n  Rebalancing (signal flip): {sorted(flipped)}"
+              + (f";  holding {sorted(hold_sleeves)}" if hold_sleeves else "") + ".")
 
     if not candidate_orders:
         print("  No orders — already at target (positions + pending).")
@@ -1214,9 +1319,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         "value of CURRENT positions → target=held, so unchanged weights yield NO orders and the sleeve "
                         "rides the market; buy-and-hold. Pair with --rebalance-band. Falls back to budget if flat.)")
     p.add_argument("--rebalance-band", type=float, default=0.0,
-                   help="fraction of AUM (e.g. 0.05). When >0, HOLD instead of rebalancing if the target asset set is "
-                        "unchanged AND the largest move is < band — trade only on a signal flip or a large cash sweep "
-                        "(buy-and-hold as backtested). 0 (default) = true up to exact target every run (back-compat).")
+                   help="position tolerance in WEIGHT POINTS of the book, as a fraction (0.005 = half a percentage "
+                        "point). When >0, a sleeve whose signal has not flipped still TRUES UP any leg sitting more "
+                        "than the band away from its target weight (an unestablished or badly-off position), while "
+                        "smaller moves are held as drift. Keep it small: 0.05 would be FIVE weight points, more than "
+                        "the whole target position in most single names. 0 (default) = hold everything on an "
+                        "unchanged sleeve (back-compat).")
+    p.add_argument("--no-sleeve-hold", action="store_true",
+                   help="disable the PER-SLEEVE buy-and-hold guard (default ON): normally an allocated sleeve whose own "
+                        "asset set is unchanged is HELD (no drift rebalance) even when another sleeve on the same blended "
+                        "account flips; this flag forces a full true-up of every sleeve to target on this run.")
     p.add_argument("--max-staleness-days", type=int, default=4, help="refuse --submit if weights older than N days (default 4)")
     p.add_argument("--force-stale", action="store_true", help="override the staleness guard on --submit")
     p.add_argument("--order-type", choices=("MOO", "MKT", "LOO", "LMT"), default="MOO",
