@@ -81,6 +81,10 @@ _MIC_TO_IB_EXCHANGE: Mapping[str, str] = {
     "XCSE": "CPH",    # Nasdaq Copenhagen (TRMD-A)
     "XMAD": "BM",     # Bolsa de Madrid / BME (REP)
     "XAMS": "AEB",    # Euronext Amsterdam (KENDR)
+    # Nasdaq Stockholm (SWED-A, an 11% R05 weight). Its absence was NOT an account permission — the
+    # resolver rejected the venue before ever calling IB ("no exchange mapping for MIC venue='XSTO'"),
+    # so the leg was BLOCKED on every run since inception and SEK never appeared in the account.
+    "XSTO": "SFB",    # Nasdaq Stockholm (SWED-A)
 }
 
 
