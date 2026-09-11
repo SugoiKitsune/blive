@@ -503,13 +503,10 @@ def _sleeve_universe(db_key: str, sfera_root: Path | None = None) -> set[str]:
         return set()
 
 
-def _sleeve_flipped(db_key: str, ref_date, today_map: dict, sfera_root: Path | None = None) -> bool:
-    """Did THIS strategy's OWN target change vs its previous stored date? The robust per-sleeve flip signal:
-    it compares the strategy's own (identifier -> rounded weight) map today against the most recent prior date
-    in strategy.target_weights — completely independent of the shared/blended account (so R02 and R04 sharing a
-    US-ETF universe is a non-issue). A stable single-asset sleeve (R02={TQQQ:1}, R04={BIL:1} every day) is NOT
-    flipped -> HELD; a book whose composition/gate changed (R05) IS flipped -> rebalanced. No prior history ->
-    not flipped (hold). DB error -> flipped (degrade to the old full-rebalance rather than freeze trading)."""
+def _sleeve_prev_map(db_key: str, ref_date, sfera_root: Path | None = None) -> dict | None:
+    """The strategy's OWN (identifier -> rounded weight) map on its most recent stored date BEFORE ref_date —
+    i.e. what this sleeve was holding going into today. None when there is no prior history or the DB cannot
+    be read (callers treat None as 'unknown', never as 'held nothing')."""
     try:
         import psycopg
         with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
@@ -517,13 +514,33 @@ def _sleeve_flipped(db_key: str, ref_date, today_map: dict, sfera_root: Path | N
                         "WHERE strategy=%s AND deprecated_at IS NULL AND date < %s", (db_key, ref_date))
             prev = cur.fetchone()[0]
             if prev is None:
-                return False
+                return None
             cur.execute("SELECT identifier, weight FROM strategy.target_weights "
                         "WHERE strategy=%s AND date=%s AND deprecated_at IS NULL AND weight<>0", (db_key, prev))
-            prev_map = {r[0]: round(float(r[1]), 4) for r in cur.fetchall() if r[0] != "CASH"}
-        return prev_map != today_map
-    except Exception:  # noqa: BLE001 - can't compare -> don't silently freeze; fall back to rebalance
-        return True
+            return {r[0]: round(float(r[1]), 4) for r in cur.fetchall() if r[0] != "CASH"}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _sleeve_flipped(db_key: str, ref_date, today_map: dict, sfera_root: Path | None = None) -> bool:
+    """Did THIS strategy's OWN target change vs its previous stored date? The robust per-sleeve flip signal:
+    it compares the strategy's own (identifier -> rounded weight) map today against the most recent prior date
+    in strategy.target_weights — completely independent of the shared/blended account (so R02 and R04 sharing a
+    US-ETF universe is a non-issue). A stable single-asset sleeve (R02={TQQQ:1}, R04={BIL:1} every day) is NOT
+    flipped -> HELD; a book whose composition/gate changed (R05) IS flipped -> rebalanced. No prior history ->
+    not flipped (hold). DB error -> flipped (degrade to the old full-rebalance rather than freeze trading)."""
+    prev_map = _sleeve_prev_map(db_key, ref_date, sfera_root)
+    if prev_map is None:
+        # distinguish "no history" (hold) from "DB error" (rebalance): re-probe cheaply
+        try:
+            import psycopg
+            with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM strategy.target_weights WHERE strategy=%s AND date < %s LIMIT 1",
+                            (db_key, ref_date))
+                return False if cur.fetchone() is None else True
+        except Exception:  # noqa: BLE001 - can't compare -> don't silently freeze; fall back to rebalance
+            return True
+    return prev_map != today_map
 
 
 # per-symbol EODHD price currency (e.g. GBX for LSE pence) — used to convert the sfera EOD close to USD.
@@ -722,6 +739,13 @@ async def _run(args: argparse.Namespace) -> int:
             # every rally, a contrarian overlay the backtest never had. A hold-until-flip sleeve wants a band so
             # wide that only a signal flip or an empty position can move it.
             sleeve_band: dict[str, float] = {}
+            # Kept for the ROTATION re-blend below (after positions and prices are known): each sleeve's
+            # allocated budget, today's own weights, and what it was holding going into today. A sleeve that
+            # flips is re-sized to the market value of what it HELD, not to its original budget — so it
+            # carries its own P&L and FX into the next asset instead of resetting to the allocation.
+            sleeve_budget: dict[str, Decimal] = {}
+            sleeve_weights: dict[str, dict] = {}
+            sleeve_prev: dict[str, dict | None] = {}
             total_budget = Decimal("0")
             oldest: date | None = None
             labels: list[str] = []
@@ -734,6 +758,9 @@ async def _run(args: argparse.Namespace) -> int:
                 _tmap = {s: round(float(wt), 4) for s, wt in w_i.items() if wt != 0 and s != "CASH"}
                 sleeve_universes[code_i] = _sleeve_universe(dbk_i, Path(args.sfera_root)) or set(_tmap)
                 sleeve_flip[code_i] = _sleeve_flipped(dbk_i, d_i, _tmap, Path(args.sfera_root))
+                sleeve_budget[code_i] = b
+                sleeve_weights[code_i] = {s: wt for s, wt in w_i.items() if s != "CASH"}
+                sleeve_prev[code_i] = _sleeve_prev_map(dbk_i, d_i, Path(args.sfera_root))
                 for sym, wt in w_i.items():
                     combined[sym] = combined.get(sym, Decimal("0")) + b * wt
                     if wt != 0 and code_i not in sym_origin.get(sym, []):
@@ -775,6 +802,7 @@ async def _run(args: argparse.Namespace) -> int:
         sleeve_universes = {code: (_sleeve_universe(db_key, Path(args.sfera_root)) or set(_tmap))}
         sleeve_flip = {code: _sleeve_flipped(db_key, signal_date, _tmap, Path(args.sfera_root))}
         sleeve_band = {}                              # single-strategy run: --rebalance-band applies as-is
+        sleeve_budget, sleeve_weights, sleeve_prev = {}, {}, {}   # rotation re-blend is portfolio-mode only
 
     _ensure_eu_instruments(weights, Path(args.sfera_root))   # register EU equities (R05) in _CATALOGUE before sizing
     tradable_targets, cash_residual = _print_weights(weights, signal_date, source)
@@ -949,6 +977,58 @@ async def _run(args: argparse.Namespace) -> int:
         USD-per-unit from yfmktdt.fx_rates. R05 is multi-ccy (NOK/DKK/EUR/GBP); US legs stay USD (×1)."""
         pc = _PRICE_CCY.get(sym) or getattr(_CATALOGUE.get(sym, None), "currency", "USD")
         return prices[sym] * Decimal(str(_usd_per_unit(pc, sroot)))
+
+    # --- ROTATION RE-BLEND: a sleeve that flips is sized to what it HELD, not to its original budget ----------
+    # Capital is committed to a sleeve once and then RIDES: its value floats with its asset's price and, for a
+    # USD holding in a GBP account, with GBPUSD. Between flips the drift band keeps that untouched. At a FLIP the
+    # question is "how much does this sleeve have to put into the new asset?" — and the honest answer is the
+    # market value of what it is rotating OUT of, valued now with per-leg FX. Sizing the new asset to the fixed
+    # budget instead threw the sleeve's own P&L away every rotation: a sleeve that had grown to GBP 58k bought
+    # GBP 50k of the new asset and dumped 8k to cash; one that had shrunk was topped up from nowhere. Neither is
+    # the backtest, which compounds.
+    # So for each flipped sleeve, value yesterday's holdings (its prev weights say what was its; a leg two
+    # sleeves both held is split pro-rata by budget x prev weight) and use that as its budget in the blend.
+    # STAGE 1 LIMIT: a sleeve that was sitting in CASH yesterday (an empty prev map) has no holdings to value
+    # and keeps its budget — sleeve cash is not attributed yet (that is the per-sleeve NAV ledger, stage 2).
+    if sleeve_prev and any(sleeve_flip.get(c) for c in sleeve_prev):
+        def _sleeve_mv_usd(code_x: str) -> Decimal:
+            prev_x = sleeve_prev.get(code_x) or {}
+            mv = Decimal("0")
+            for sym, pw in prev_x.items():
+                if sym not in positions or not pw:
+                    continue
+                claims = {c: sleeve_budget[c] * Decimal(str(abs(sleeve_prev[c].get(sym, 0.0))))
+                          for c in sleeve_prev if sleeve_prev[c] and sleeve_prev[c].get(sym)}
+                den = sum(claims.values(), Decimal("0"))
+                frac = (claims[code_x] / den) if den > 0 else Decimal("1")
+                try:
+                    mv += positions[sym].quantity * _px_usd(sym) * frac
+                except Exception:  # noqa: BLE001 - an unpriceable leg contributes nothing, never blocks
+                    pass
+            return mv
+        new_budget = dict(sleeve_budget)
+        for code_x, flipped in sleeve_flip.items():
+            if not flipped or code_x not in sleeve_budget:
+                continue
+            mv_usd = _sleeve_mv_usd(code_x)
+            if mv_usd <= 0:
+                print(f"  ROTATION {code_x}: no valued holdings going into today (was in cash?) -> "
+                      f"sizing to its budget {float(sleeve_budget[code_x]):,.0f} {base_ccy}")
+                continue
+            mv_base = (mv_usd / fx).quantize(Decimal("0.01")) if fx else mv_usd
+            print(f"  ROTATION {code_x}: sizing the new book to what it HELD — ${float(mv_usd):,.0f} = "
+                  f"{float(mv_base):,.0f} {base_ccy} (budget was {float(sleeve_budget[code_x]):,.0f}, "
+                  f"{float(mv_base / sleeve_budget[code_x] - 1):+.1%})")
+            new_budget[code_x] = mv_base
+        if new_budget != sleeve_budget:
+            new_total = sum(new_budget.values(), Decimal("0"))
+            if new_total > 0:
+                for sym in list(target_weights):
+                    target_weights[sym] = sum((new_budget[c] * Decimal(str(sleeve_weights[c].get(sym, 0)))
+                                               for c in new_budget), Decimal("0")) / new_total
+                args.budget = float(new_total)
+                print(f"  ROTATION: blended pot {float(sum(sleeve_budget.values())):,.0f} -> "
+                      f"{float(new_total):,.0f} {base_ccy}; blend weights re-derived")
 
     # HOLDINGS basis: size against the current market value of what you ALREADY HOLD (mark-to-market, USD).
     size_basis = str(getattr(args, "size_basis", "budget")).lower()
