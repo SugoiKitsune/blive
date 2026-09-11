@@ -739,6 +739,12 @@ async def _run(args: argparse.Namespace) -> int:
             # every rally, a contrarian overlay the backtest never had. A hold-until-flip sleeve wants a band so
             # wide that only a signal flip or an empty position can move it.
             sleeve_band: dict[str, float] = {}
+            # Sleeves that NEVER trade on drift: a single-asset hold-until-flip book (R02 in TQQQ, R04 in BIL)
+            # rides its asset until its own signal flips. Price and FX moving its value are the strategy's
+            # return, not deviation. Only an EMPTY position (establishment) or a flip can move it. This is a
+            # rule, not a very wide band — "within ±100% of book weight" would be the same behaviour wearing
+            # a ridiculous number.
+            sleeve_hold_drift: set[str] = set()
             # Kept for the ROTATION re-blend below (after positions and prices are known): each sleeve's
             # allocated budget, today's own weights, and what it was holding going into today. A sleeve that
             # flips is re-sized to the market value of what it HELD, not to its original budget — so it
@@ -754,6 +760,8 @@ async def _run(args: argparse.Namespace) -> int:
                 b = Decimal(str(item["budget"]))
                 if item.get("band") is not None:
                     sleeve_band[code_i] = float(item["band"])
+                if item.get("hold_drift"):
+                    sleeve_hold_drift.add(code_i)
                 w_i, d_i, _ = _load_one(dbk_i)
                 _tmap = {s: round(float(wt), 4) for s, wt in w_i.items() if wt != 0 and s != "CASH"}
                 sleeve_universes[code_i] = _sleeve_universe(dbk_i, Path(args.sfera_root)) or set(_tmap)
@@ -802,6 +810,7 @@ async def _run(args: argparse.Namespace) -> int:
         sleeve_universes = {code: (_sleeve_universe(db_key, Path(args.sfera_root)) or set(_tmap))}
         sleeve_flip = {code: _sleeve_flipped(db_key, signal_date, _tmap, Path(args.sfera_root))}
         sleeve_band = {}                              # single-strategy run: --rebalance-band applies as-is
+        sleeve_hold_drift = set()
         sleeve_budget, sleeve_weights, sleeve_prev = {}, {}, {}   # rotation re-blend is portfolio-mode only
 
     _ensure_eu_instruments(weights, Path(args.sfera_root))   # register EU equities (R05) in _CATALOGUE before sizing
@@ -1176,19 +1185,28 @@ async def _run(args: argparse.Namespace) -> int:
         """True if this order CORRECTS a real gap vs target (trade it) rather than trimming drift (hold).
 
         An EMPTY position that the target wants held is never drift — it is a leg that was never
-        established (SWED-A.ST sat unbought for months behind a resolver gap) — so it always trades,
-        whatever the band. Everything else is drift, judged against the leg's own band: price moving,
-        FX moving the GBP-denominated target, whole-share rounding. For a hold-until-flip sleeve those are
-        the strategy's return, not an error, and its band is set wide enough that they never trade."""
+        established (SWED-A.ST sat unbought for months behind a resolver gap) — so it always trades.
+        A leg of a HOLD-UNTIL-FLIP sleeve is never traded on drift at all: its value moving with price
+        and FX is the strategy's return. Everything else is drift judged against the leg's own band."""
         try:
             held = abs(float(positions[sym].quantity)) if sym in positions else 0.0
             tgt = abs(float(target_weights.get(sym, 0) or 0))
             if held < 1e-9 and tgt > 1e-9:
                 return True                                       # establishment, not drift
+            if (_sleeves_of(sym) or set()) & sleeve_hold_drift:
+                return False                                      # hold-until-flip: drift is the return
             move_usd = abs(float(order.quantity) * float(_px_usd(sym)))
         except Exception:
             return True                                           # unpriceable -> never silently skip
         return move_usd >= _sizing_usd * _band_for(sym)
+
+    def _why_held(sym: str) -> str:
+        """The rule that held this leg, in words the log can be read by."""
+        if (_sleeves_of(sym) or set()) & sleeve_hold_drift:
+            return "hold-until-flip sleeve: price/FX drift is the strategy's return, not traded"
+        b = _band_for(sym)
+        return (f"within ±{b:.2%} of book weight (${_sizing_usd * b:,.0f})" if b > 0
+                else "no drift band set (drop-everything mode)")
     if candidate_orders and hold_sleeves and not getattr(args, "no_sleeve_hold", False):
         kept: list[Order] = []
         dropped: list = []
@@ -1196,25 +1214,27 @@ async def _run(args: argparse.Namespace) -> int:
             osym = _id_by_inst.get(o.instrument, o.instrument.symbol)
             osl = _sleeves_of(osym)
             if osl and osl <= hold_sleeves:                       # order belongs ONLY to unchanged sleeve(s)
-                if (_band > 0 or sleeve_band) and _is_material(osym, o):   # a real gap vs target -> TRADE it
+                if (_band > 0 or sleeve_band or sleeve_hold_drift) and _is_material(osym, o):   # a real gap -> TRADE
                     kept.append(o)
                     continue
-                dropped.append((osym, o))                         # within band (or no band) -> genuine buy-and-hold
+                dropped.append((osym, o))                         # drift (or no band) -> genuine buy-and-hold
             else:
                 kept.append(o)
         _bandtxt = (f"within ±{_band:.2%} of book weight (${_band_usd:,.0f})" if _band > 0
                     else "no --rebalance-band set (drop-everything mode)")
         for osym, o in dropped:
-            print(f"  HOLD {osym} [{'/'.join(sorted(_sleeves_of(osym))) or '?'}]: sleeve unchanged and position "
-                  f"{_bandtxt} -> {o.side.value} {float(o.quantity):.0f} NOT placed — drift, not a gap.")
-        if _band > 0:
+            print(f"  HOLD {osym} [{'/'.join(sorted(_sleeves_of(osym))) or '?'}]: sleeve unchanged, "
+                  f"{_why_held(osym)} -> {o.side.value} {float(o.quantity):.0f} NOT placed.")
+        if _band > 0 or sleeve_band:
             for o in kept:
                 ksym = _id_by_inst.get(o.instrument, o.instrument.symbol)
                 ksl = _sleeves_of(ksym)
                 if ksl and ksl <= hold_sleeves:
-                    print(f"  TRUE-UP {ksym} [{'/'.join(sorted(ksl))}]: sleeve unchanged BUT position is off target "
-                          f"by more than ±{_band:.2%} of book weight -> {o.side.value} {float(o.quantity):.0f} "
-                          f"PLACED (establish/correct, not drift).")
+                    kh = abs(float(positions[ksym].quantity)) if ksym in positions else 0.0
+                    why = ("position is EMPTY and the target wants it held (establish)" if kh < 1e-9
+                           else f"position is off target by more than ±{_band_for(ksym):.2%} of book weight")
+                    print(f"  TRUE-UP {ksym} [{'/'.join(sorted(ksl))}]: sleeve unchanged BUT {why} "
+                          f"-> {o.side.value} {float(o.quantity):.0f} PLACED.")
         candidate_orders = kept
         if dropped and not candidate_orders:                      # everything held -> emit a clean HOLD decision
             print(f"\n  HOLDING — sleeves {sorted(hold_sleeves)} unchanged AND every position {_bandtxt} "
