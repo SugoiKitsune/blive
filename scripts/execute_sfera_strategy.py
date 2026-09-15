@@ -258,7 +258,26 @@ def _executed_today(account: str) -> str | None:
     return None
 
 
-def _record_execution(account: str, plan: str) -> None:
+def _load_executed_targets(account: str) -> dict[str, dict]:
+    """{sleeve code: {identifier: rounded weight}} — the target each sleeve was LAST REBALANCED TO on this
+    account. What the account actually holds, as far as the executor knows. Empty when nothing was ever
+    recorded (callers fall back to the day-over-day comparison, and the first submit seeds it)."""
+    try:
+        rec = json.loads(_EXEC_STATE_PATH.read_text()).get(account) or {}
+        return {k: dict(v) for k, v in (rec.get("sleeves") or {}).items()}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None = None) -> None:
+    """Stamp the submit — and, per sleeve, the target it is now rebalanced to.
+
+    That per-sleeve map is what makes a flip robust to WHEN the executor runs. The day-over-day test
+    ("does today's row differ from yesterday's?") is true on exactly one morning after a month-end; miss
+    it — a dry-run first, a skipped day, a deliberate choice to trade on the 5th rather than the 1st —
+    and every later day reads "unchanged", hold_drift keeps the OLD book, and the rebalance is lost until
+    the next month-end. Comparing against what the sleeve was last EXECUTED to is true every day until the
+    trade actually happens. Only a submit writes this; a dry-run must never claim the account moved."""
     try:
         _EXEC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         data = {}
@@ -267,8 +286,12 @@ def _record_execution(account: str, plan: str) -> None:
                 data = json.loads(_EXEC_STATE_PATH.read_text())
             except Exception:  # noqa: BLE001
                 data = {}
+        prev = data.get(account) or {}
+        merged = dict(prev.get("sleeves") or {})
+        if sleeves:
+            merged.update(sleeves)
         data[account] = {"date": date.today().isoformat(), "plan": plan,
-                         "time": datetime.now(tz=timezone.utc).isoformat()}
+                         "time": datetime.now(tz=timezone.utc).isoformat(), "sleeves": merged}
         _EXEC_STATE_PATH.write_text(json.dumps(data, indent=2))
     except Exception:  # noqa: BLE001
         pass
@@ -752,6 +775,7 @@ async def _run(args: argparse.Namespace) -> int:
             sleeve_budget: dict[str, Decimal] = {}
             sleeve_weights: dict[str, dict] = {}
             sleeve_prev: dict[str, dict | None] = {}
+            sleeve_today: dict[str, dict] = {}         # code -> today's rounded map (for the executed-state flip test)
             total_budget = Decimal("0")
             oldest: date | None = None
             labels: list[str] = []
@@ -769,6 +793,7 @@ async def _run(args: argparse.Namespace) -> int:
                 sleeve_budget[code_i] = b
                 sleeve_weights[code_i] = {s: wt for s, wt in w_i.items() if s != "CASH"}
                 sleeve_prev[code_i] = _sleeve_prev_map(dbk_i, d_i, Path(args.sfera_root))
+                sleeve_today[code_i] = _tmap
                 for sym, wt in w_i.items():
                     combined[sym] = combined.get(sym, Decimal("0")) + b * wt
                     if wt != 0 and code_i not in sym_origin.get(sym, []):
@@ -812,6 +837,7 @@ async def _run(args: argparse.Namespace) -> int:
         sleeve_band = {}                              # single-strategy run: --rebalance-band applies as-is
         sleeve_hold_drift = set()
         sleeve_budget, sleeve_weights, sleeve_prev = {}, {}, {}   # rotation re-blend is portfolio-mode only
+        sleeve_today = {code: _tmap}
 
     _ensure_eu_instruments(weights, Path(args.sfera_root))   # register EU equities (R05) in _CATALOGUE before sizing
     tradable_targets, cash_residual = _print_weights(weights, signal_date, source)
@@ -862,6 +888,28 @@ async def _run(args: argparse.Namespace) -> int:
     except (CredentialsMissing, ValueError) as exc:
         print(f"\nFAILED: IB credentials: {exc}")
         return 2
+
+    # --- FLIP = "target differs from what this sleeve was LAST REBALANCED TO on this account" ---------------
+    # The day-over-day test above is only a fallback. It is true on exactly one morning after a month-end;
+    # if the executor does not SUBMIT that morning (dry-run first, skipped day, a deliberate choice to
+    # trade on the 5th rather than the 1st) every later day reads "unchanged", hold_drift keeps the OLD
+    # book — dropped names never sold, resized names never resized — and the rebalance is lost until the
+    # next month-end. Against the last-executed target the flip stays true every day until it is actually
+    # traded. The same map is what the sleeve HOLDS going into today, so the rotation re-blend values the
+    # right positions even when execution is late (yesterday's ROW is already the new target by then).
+    _executed = _load_executed_targets(credentials.account_id)
+    for _c, _tm in sleeve_today.items():
+        if _c in _executed:
+            _was = sleeve_flip.get(_c)
+            sleeve_flip[_c] = (_tm != _executed[_c])
+            if _c in sleeve_prev:
+                sleeve_prev[_c] = dict(_executed[_c])
+            if sleeve_flip[_c] != _was:
+                print(f"  FLIP {_c}: {'PENDING — target differs from the last EXECUTED book (not yet traded)' if sleeve_flip[_c] else 'cleared — target already executed'}"
+                      f"{'' if sleeve_flip[_c] else ' (day-over-day test disagreed; executed state wins)'}")
+    if not _executed:
+        print("  (no executed-target state for this account yet — flips judged day-over-day; "
+              "the first submit records every sleeve's book)")
 
     clock = WallClock()
     rate_limiter = TokenBucketRateLimiter(config=IB_DEFAULT_RATE_LIMITS, clock=clock)
@@ -1243,6 +1291,10 @@ async def _run(args: argparse.Namespace) -> int:
                                       f"all positions {_bandtxt}",
                               _order_summary_rows(target_weights, prices, positions, [], sym_origin,
                                                   limit_band=float(args.limit_band), is_limit=is_limit), **_emeta)
+            if args.submit:
+                # Everything held on a SUBMIT run = the account is at today's target for every sleeve.
+                # Record it, so the executed-target state exists even before the first flip is traded.
+                _record_execution(credentials.account_id, code, sleeves=sleeve_today)
             await broker.disconnect()
             return 0
     if flipped:
@@ -1318,6 +1370,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     print(f"\n=== Submitting {args.order_type} orders ===")
     filled = canceled = rejected = risk_blocked = 0
+    submitted_any = False
     now_utc = datetime.now(tz=timezone.utc)
 
     # Capture IB's per-order error(s) so a REJECT/Cancel shows WHY (110 tick, 10311 direct-route, 201, …)
@@ -1401,6 +1454,7 @@ async def _run(args: argparse.Namespace) -> int:
               f"{order.instrument.symbol} {args.order_type}{px_str} ...")
         _ib_errs.clear()
         await broker.submit(order)
+        submitted_any = True
         terminal_state, _ = await _drain_order_lifecycle(
             broker=broker,
             target_id=ClientOrderId(order.client_order_id),
@@ -1417,8 +1471,15 @@ async def _run(args: argparse.Namespace) -> int:
         elif state_name == "REJECTED":
             rejected += 1
 
-    if filled or canceled or rejected:
-        _record_execution(credentials.account_id, code)
+    if filled or canceled or rejected or submitted_any:
+        # A submit with NO rejections is the account moving to today's target: record every sleeve's book
+        # as executed, so tomorrow's run sees "already traded" and holds. A rejected leg means the book is
+        # NOT where the target says — leave the state alone and the flip stays pending for the next run.
+        # KNOWN LIMIT: an ACCEPTED LOO counts as executed here (it fills at the next open, or does not);
+        # there is no fill reconciliation, so a resize that never fills is not retried until the next
+        # month-end. A leg that is still EMPTY is — the establishment rule trades it regardless of state.
+        _record_execution(credentials.account_id, code,
+                          sleeves=(sleeve_today if rejected == 0 else None))
     _release_run_lock()
     print(f"\n=== Done: filled={filled}  canceled={canceled}  rejected={rejected}  risk-blocked={risk_blocked} ===")
     await broker.disconnect()
