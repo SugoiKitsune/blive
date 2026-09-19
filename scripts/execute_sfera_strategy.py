@@ -269,6 +269,25 @@ def _load_executed_targets(account: str) -> dict[str, dict]:
         return {}
 
 
+_EXEC_HISTORY_PATH = Path.home() / ".blive" / "executed_history.jsonl"
+
+
+def _append_executed_history(account: str, sleeves: dict, note: str) -> None:
+    """Dated record of what each sleeve is EXECUTED to — one line per state change. The sfera Review tab
+    splits the paper account's holdings per strategy by this (targets are only a fallback): splitting by
+    TARGET weight credited R04 with half of R02's TQQQ on 2026-09-16..19 while R04's own buy never filled
+    and the sleeve sat in cash — the PAPER line rallied on shares the sleeve did not own."""
+    try:
+        _EXEC_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _EXEC_HISTORY_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"date": date.today().isoformat(),
+                                 "time": datetime.now(tz=timezone.utc).isoformat(),
+                                 "account": account, "note": note,
+                                 "sleeves": {k: dict(v) for k, v in (sleeves or {}).items()}}) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _load_pending(account: str) -> dict:
     """The orders the last SUBMIT placed on this account — {date, orders: {sym: {qty, pre_pos, sleeves}},
     prev_targets: {sleeve: map}} — kept until the next run has checked the account actually moved."""
@@ -294,6 +313,8 @@ def _settle_pending(account: str, rollback: dict[str, dict | None]) -> None:
         rec.pop("pending", None)
         data[account] = rec
         _EXEC_STATE_PATH.write_text(json.dumps(data, indent=2))
+        if rollback:
+            _append_executed_history(account, sl, f"rollback (unfilled): {sorted(rollback)}")
     except Exception:  # noqa: BLE001
         pass
 
@@ -322,6 +343,8 @@ def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None =
             merged.update(sleeves)
         data[account] = {"date": date.today().isoformat(), "plan": plan,
                          "time": datetime.now(tz=timezone.utc).isoformat(), "sleeves": merged}
+        if sleeves and merged != (prev.get("sleeves") or {}):
+            _append_executed_history(account, merged, f"submit {plan}")
         if pending:
             # FILL RECONCILIATION: an accepted LOO is not a fill. Remember what was placed and where the
             # account stood, so the next run can see whether it moved — and roll the sleeve back if not
