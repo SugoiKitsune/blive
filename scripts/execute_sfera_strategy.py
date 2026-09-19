@@ -269,7 +269,37 @@ def _load_executed_targets(account: str) -> dict[str, dict]:
         return {}
 
 
-def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None = None) -> None:
+def _load_pending(account: str) -> dict:
+    """The orders the last SUBMIT placed on this account — {date, orders: {sym: {qty, pre_pos, sleeves}},
+    prev_targets: {sleeve: map}} — kept until the next run has checked the account actually moved."""
+    try:
+        return dict((json.loads(_EXEC_STATE_PATH.read_text()).get(account) or {}).get("pending") or {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _settle_pending(account: str, rollback: dict[str, dict | None]) -> None:
+    """Close the pending record. `rollback` = sleeves whose orders did NOT fill -> their executed target is put
+    back to what it was before the submit (None = forget the sleeve), so the flip re-fires on this run."""
+    try:
+        data = json.loads(_EXEC_STATE_PATH.read_text()) if _EXEC_STATE_PATH.exists() else {}
+        rec = data.get(account) or {}
+        sl = dict(rec.get("sleeves") or {})
+        for c, prev in rollback.items():
+            if prev:
+                sl[c] = dict(prev)
+            else:
+                sl.pop(c, None)
+        rec["sleeves"] = sl
+        rec.pop("pending", None)
+        data[account] = rec
+        _EXEC_STATE_PATH.write_text(json.dumps(data, indent=2))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None = None,
+                      pending: dict | None = None, prev_targets: dict | None = None) -> None:
     """Stamp the submit — and, per sleeve, the target it is now rebalanced to.
 
     That per-sleeve map is what makes a flip robust to WHEN the executor runs. The day-over-day test
@@ -292,6 +322,14 @@ def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None =
             merged.update(sleeves)
         data[account] = {"date": date.today().isoformat(), "plan": plan,
                          "time": datetime.now(tz=timezone.utc).isoformat(), "sleeves": merged}
+        if pending:
+            # FILL RECONCILIATION: an accepted LOO is not a fill. Remember what was placed and where the
+            # account stood, so the next run can see whether it moved — and roll the sleeve back if not
+            # (R04 2026-09-17: BIL sold, the TQQQ LOO at 69.97 never filled against a 71.13 open, the
+            # sleeve was recorded as "executed -> TQQQ" and sat in CASH while every later run said HOLD).
+            data[account]["pending"] = {"date": date.today().isoformat(), "orders": pending,
+                                        "prev_targets": {k: (dict(v) if v else None)
+                                                         for k, v in (prev_targets or {}).items()}}
         _EXEC_STATE_PATH.write_text(json.dumps(data, indent=2))
     except Exception:  # noqa: BLE001
         pass
@@ -986,6 +1024,45 @@ async def _run(args: argparse.Namespace) -> int:
               + ", ".join(f"{pending_disp[c]} {float(q):+.0f}"
                           for c, q in sorted(pending_net.items(), key=lambda kv: pending_disp[kv[0]])))
 
+    # --- FILL RECONCILIATION of the LAST submit -----------------------------------------------------------
+    # The executed-target state is written on SUBMIT, but a LOO fills at the open or not at all. Compare the
+    # positions the account holds NOW with where it stood when those orders were placed: an order whose
+    # position moved less than half its size did not fill -> the sleeve(s) it served are rolled back to
+    # their pre-submit target, so today's run sees the flip PENDING again and re-issues. Only a previous
+    # day's submit is judged (today's LOOs cannot have filled yet before the open).
+    _pend = _load_pending(credentials.account_id)
+    if _pend.get("orders") and str(_pend.get("date", "")) < date.today().isoformat():
+        _unfilled: dict[str, dict | None] = {}
+        _notes: list[str] = []
+        _prevs = _pend.get("prev_targets") or {}
+        for _sym, _o in (_pend.get("orders") or {}).items():
+            try:
+                _cur = float(positions[_sym].quantity) if _sym in positions else 0.0
+                _qty = float(_o.get("qty", 0)); _pre = float(_o.get("pre_pos", 0.0))
+            except Exception:  # noqa: BLE001
+                continue
+            _moved = (_cur - _pre) * (1.0 if _qty > 0 else -1.0)
+            if abs(_qty) > 0 and _moved < 0.5 * abs(_qty):
+                _notes.append(f"{_sym} {_qty:+.0f} (position {_pre:.0f} -> {_cur:.0f})")
+                for _c in (_o.get("sleeves") or []):
+                    _unfilled[_c] = _prevs.get(_c)
+        if _unfilled:
+            print(f"  UNFILLED from the {_pend.get('date')} submit: " + "; ".join(_notes))
+            for _c, _prev in _unfilled.items():
+                if _prev:
+                    _executed[_c] = dict(_prev)
+                    if _c in sleeve_prev:
+                        sleeve_prev[_c] = dict(_prev)
+                else:
+                    _executed.pop(_c, None)
+                if _c in sleeve_today:
+                    sleeve_flip[_c] = (_c not in _executed) or (sleeve_today[_c] != _executed[_c])
+                print(f"    -> {_c}: executed state rolled back to {_prev or 'unknown'}; flip "
+                      f"{'PENDING — re-issuing today' if sleeve_flip.get(_c) else 'not pending'}")
+        else:
+            print(f"  Fill check: every order from the {_pend.get('date')} submit is reflected in positions.")
+        _settle_pending(credentials.account_id, _unfilled)
+
     # Probe the union of today's tradable targets and any held catalogue legs
     # (held-but-not-target legs must be price-known so the sizer can flatten them).
     probe_syms = sorted(set(tradable_targets) | (set(positions) & set(_CATALOGUE)))
@@ -1371,6 +1448,8 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"\n=== Submitting {args.order_type} orders ===")
     filled = canceled = rejected = risk_blocked = 0
     submitted_any = False
+    _placed: dict[str, dict] = {}                   # sym -> {qty, pre_pos, sleeves} for the fill reconciliation
+    _prev_for_pending = {c: (dict(sleeve_prev[c]) if sleeve_prev.get(c) else None) for c in sleeve_flip if sleeve_flip.get(c)}
     now_utc = datetime.now(tz=timezone.utc)
 
     # Capture IB's per-order error(s) so a REJECT/Cancel shows WHY (110 tick, 10311 direct-route, 201, …)
@@ -1455,6 +1534,12 @@ async def _run(args: argparse.Namespace) -> int:
         _ib_errs.clear()
         await broker.submit(order)
         submitted_any = True
+        _psym = _id_by_inst.get(order.instrument, order.instrument.symbol)
+        _pqty = float(order.quantity) * (1.0 if order.side == OrderSide.BUY else -1.0)
+        _ppre = float(positions[_psym].quantity) if _psym in positions else 0.0
+        _pfl = {c for c in sleeve_flip if sleeve_flip.get(c)}
+        _placed[_psym] = {"qty": _pqty, "pre_pos": _ppre,
+                          "sleeves": sorted((_sleeves_of(_psym) & _pfl) or _sleeves_of(_psym))}
         terminal_state, _ = await _drain_order_lifecycle(
             broker=broker,
             target_id=ClientOrderId(order.client_order_id),
@@ -1475,11 +1560,11 @@ async def _run(args: argparse.Namespace) -> int:
         # A submit with NO rejections is the account moving to today's target: record every sleeve's book
         # as executed, so tomorrow's run sees "already traded" and holds. A rejected leg means the book is
         # NOT where the target says — leave the state alone and the flip stays pending for the next run.
-        # KNOWN LIMIT: an ACCEPTED LOO counts as executed here (it fills at the next open, or does not);
-        # there is no fill reconciliation, so a resize that never fills is not retried until the next
-        # month-end. A leg that is still EMPTY is — the establishment rule trades it regardless of state.
+        # An ACCEPTED LOO counts as executed here (it fills at the next open, or does not) — the `pending`
+        # record is what lets the NEXT run check the account actually moved and roll the sleeve back if not.
         _record_execution(credentials.account_id, code,
-                          sleeves=(sleeve_today if rejected == 0 else None))
+                          sleeves=(sleeve_today if rejected == 0 else None),
+                          pending=_placed, prev_targets=_prev_for_pending)
     _release_run_lock()
     print(f"\n=== Done: filled={filled}  canceled={canceled}  rejected={rejected}  risk-blocked={risk_blocked} ===")
     await broker.disconnect()
