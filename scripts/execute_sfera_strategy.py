@@ -334,6 +334,31 @@ def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None =
     except Exception:  # noqa: BLE001
         pass
 
+# The LOO/LMT collar (--limit-band, 3%) is sized for an unlevered ETF. A 3x fund gaps 3x as far: on
+# 2026-09-17 TQQQ opened +4.7% and a BUY LOO at prev_close x 1.03 sat below the opening print — an
+# opening-auction limit below the open cannot fill, it expired, and R04 sat in cash. The collar scales
+# with the fund's leverage so it still guards against a broken print without refusing a normal gap.
+_LEVERAGE: dict[str, float] = {
+    "TQQQ": 3.0, "SQQQ": 3.0, "TECL": 3.0, "TECS": 3.0, "SPXL": 3.0, "SPXS": 3.0, "UPRO": 3.0, "SOXL": 3.0,
+    "SOXS": 3.0, "UVXY": 1.5, "SVXY": 0.5, "QLD": 2.0, "SSO": 2.0,
+}
+
+
+def _collar(sym: str, band: Decimal) -> Decimal:
+    return band * Decimal(str(_LEVERAGE.get(sym, 1.0)))
+
+
+def _us_session_open_now() -> bool:
+    """True inside the US regular session (09:35-15:55 ET, weekdays) — the window where a re-issued order
+    must be a DAY order (an OPG order placed mid-session waits for TOMORROW's open)."""
+    try:
+        from zoneinfo import ZoneInfo
+        et = datetime.now(tz=ZoneInfo("America/New_York"))
+        return et.weekday() < 5 and (9, 35) <= (et.hour, et.minute) <= (15, 55)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _DEFAULT_SFERA_ROOT = Path(
     r"C:\Personal\Business & Investments\Python codes\sfera"
 )
@@ -505,7 +530,8 @@ def _order_summary_rows(target_weights, prices, positions, orders, sym_origin, *
         if o is not None:
             side = str(o.side.value).upper()
             qty = float(o.quantity)
-            lim = (px * (1 + limit_band) if side == "BUY" else px * (1 - limit_band)) if is_limit else None
+            _lb = limit_band * _LEVERAGE.get(sym, 1.0)
+            lim = (px * (1 + _lb) if side == "BUY" else px * (1 - _lb)) if is_limit else None
             notional = qty * usd_px                       # USD notional (local price × per-leg FX)
         else:
             side = "HOLD" if pos else "FLAT"
@@ -1031,7 +1057,9 @@ async def _run(args: argparse.Namespace) -> int:
     # their pre-submit target, so today's run sees the flip PENDING again and re-issues. Only a previous
     # day's submit is judged (today's LOOs cannot have filled yet before the open).
     _pend = _load_pending(credentials.account_id)
-    if _pend.get("orders") and str(_pend.get("date", "")) < date.today().isoformat():
+    _us_open_now = _us_session_open_now()
+    _refill_needed = False
+    if _pend.get("orders") and (str(_pend.get("date", "")) < date.today().isoformat() or _us_open_now):
         _unfilled: dict[str, dict | None] = {}
         _notes: list[str] = []
         _prevs = _pend.get("prev_targets") or {}
@@ -1047,6 +1075,7 @@ async def _run(args: argparse.Namespace) -> int:
                 for _c in (_o.get("sleeves") or []):
                     _unfilled[_c] = _prevs.get(_c)
         if _unfilled:
+            _refill_needed = True
             print(f"  UNFILLED from the {_pend.get('date')} submit: " + "; ".join(_notes))
             for _c, _prev in _unfilled.items():
                 if _prev:
@@ -1438,7 +1467,7 @@ async def _run(args: argparse.Namespace) -> int:
         return 2
 
     prev = _executed_today(credentials.account_id)
-    if prev and not args.force:
+    if prev and not _refill_needed and not args.force:
         print(f"\nFAILED: account {credentials.account_id} already executed today ({prev}). "
               "Re-running would re-trade the day's target — pass --force to override.")
         _release_run_lock()
@@ -1502,14 +1531,22 @@ async def _run(args: argparse.Namespace) -> int:
 
     for desired in candidate_orders:
         lp: Decimal | None = None
+        _osym = _id_by_inst.get(desired.instrument, desired.instrument.symbol)
         if is_limit:
-            ref = prices[_id_by_inst.get(desired.instrument, desired.instrument.symbol)]   # LOCAL ccy for the order
-            mult = (Decimal("1") + band) if desired.side == OrderSide.BUY else (Decimal("1") - band)
+            ref = prices[_osym]                                          # LOCAL ccy for the order
+            _b = _collar(_osym, band)                                    # leverage-scaled collar
+            mult = (Decimal("1") + _b) if desired.side == OrderSide.BUY else (Decimal("1") - _b)
             lp = await _round_to_tick(desired.instrument, ref * mult)   # round to venue minTick (fixes IB error 110)
+            if _b != band:
+                print(f"  collar {_osym}: ±{float(_b):.1%} ({_LEVERAGE.get(_osym):.1f}x fund; base ±{float(band):.1%})")
         # OPG (opening-auction) tif is US-only — EU venues (Euronext/LSE/XETRA/BM/Copenhagen) reject it
-        # (IB-201). For EU single-name equities send a plain DAY limit instead; US ETFs keep the OPG tif.
-        _is_eu = _id_by_inst.get(desired.instrument, desired.instrument.symbol) in _PRICE_CCY
-        _tif = TimeInForce.DAY if (_is_eu and tif == TimeInForce.OPG) else tif
+        # (IB-201). For EU single-name equities send a plain DAY limit instead; US ETFs keep the OPG tif —
+        # unless the US session is already open (a same-day re-issue after an unfilled LOO): an OPG order
+        # placed mid-session would wait for tomorrow's auction, so it goes as a DAY order at the live price.
+        _is_eu = _osym in _PRICE_CCY
+        _tif = TimeInForce.DAY if ((_is_eu or _us_open_now) and tif == TimeInForce.OPG) else tif
+        if _tif != tif and not _is_eu:
+            print(f"  {_osym}: US session open -> {order_type.value} DAY instead of OPG")
         order = _make_order(desired, order_type=order_type, tif=_tif, limit_price=lp, label=f"sfera-{code}")
 
         if engine is not None:
