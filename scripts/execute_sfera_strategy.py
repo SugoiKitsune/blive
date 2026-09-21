@@ -553,7 +553,7 @@ def _order_summary_rows(target_weights, prices, positions, orders, sym_origin, *
         if o is not None:
             side = str(o.side.value).upper()
             qty = float(o.quantity)
-            _lb = limit_band * _LEVERAGE.get(sym, 1.0)
+            _lb = limit_band * _LEVERAGE.get(s, 1.0)
             lim = (px * (1 + _lb) if side == "BUY" else px * (1 - _lb)) if is_limit else None
             notional = qty * usd_px                       # USD notional (local price × per-leg FX)
         else:
