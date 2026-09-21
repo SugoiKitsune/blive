@@ -367,8 +367,13 @@ _LEVERAGE: dict[str, float] = {
 }
 
 
+# ...capped: 3x of a 3% band is a 9% ceiling, more room than a broken print deserves (user, 2026-09-21: keep
+# it 5% to the prior close). 5% still clears the +4.7% open that expired the 2026-09-17 order.
+_COLLAR_CAP = Decimal("0.05")
+
+
 def _collar(sym: str, band: Decimal) -> Decimal:
-    return band * Decimal(str(_LEVERAGE.get(sym, 1.0)))
+    return min(band * Decimal(str(_LEVERAGE.get(sym, 1.0))), _COLLAR_CAP)
 
 
 def _us_session_open_now() -> bool:
