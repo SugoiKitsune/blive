@@ -1207,8 +1207,21 @@ async def _run(args: argparse.Namespace) -> int:
                       f"sizing to its budget {float(sleeve_budget[code_x]):,.0f} {base_ccy}")
                 continue
             mv_base = (mv_usd / fx).quantize(Decimal("0.01")) if fx else mv_usd
+            # DE-LEVER before this becomes a budget. The blend multiplies a sleeve's budget by its OWN target
+            # weights, and those weights are gross: R05 is a 150%-gross book, so the market value it holds is
+            # already 1.5 x its capital. Feeding the raw MV back in applied the 1.5 a SECOND time (1.5 x 1.5 =
+            # 2.25x) — on 2026-09-22 that asked the paper account to buy another $99,662 of a book that was
+            # already at its full 150% target, every day the sleeve rotated. A budget is CAPITAL, so divide the
+            # held MV by the gross of the weights that produced it. R02/R04 are single-asset (gross 1.0) and
+            # are untouched by this.
+            gross_prev = sum((abs(Decimal(str(w))) for w in (sleeve_prev.get(code_x) or {}).values()), Decimal("0"))
+            if gross_prev > Decimal("1.0001"):
+                lev_mv, mv_base = mv_base, (mv_base / gross_prev).quantize(Decimal("0.01"))
+                print(f"  ROTATION {code_x}: held MV {float(lev_mv):,.0f} {base_ccy} is a "
+                      f"{float(gross_prev):.2f}x-gross book -> capital {float(mv_base):,.0f} {base_ccy} "
+                      f"(the weights re-apply the gross; MV as budget would double it)")
             print(f"  ROTATION {code_x}: sizing the new book to what it HELD — ${float(mv_usd):,.0f} = "
-                  f"{float(mv_base):,.0f} {base_ccy} (budget was {float(sleeve_budget[code_x]):,.0f}, "
+                  f"{float(mv_base):,.0f} {base_ccy} capital (budget was {float(sleeve_budget[code_x]):,.0f}, "
                   f"{float(mv_base / sleeve_budget[code_x] - 1):+.1%})")
             new_budget[code_x] = mv_base
         if new_budget != sleeve_budget:
