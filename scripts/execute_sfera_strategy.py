@@ -637,6 +637,25 @@ def _sleeve_prev_map(db_key: str, ref_date, sfera_root: Path | None = None) -> d
         return None
 
 
+# A FLIP is a CHANGE OF BOOK, not a change of digits. Every comparison below used exact dict equality on
+# weights rounded to 4dp, so a 2-basis-point difference — 0.0829 today vs the 0.0831 recorded when the book
+# was executed — read as "the target changed" and rebalanced a MONTHLY strategy every single day mid-month
+# (R05 on 2026-09-24: thirteen trims of $80-$1,250 against a book whose target weights had not moved since
+# 09-14). Weight maps come from different sources (the signal, the executed record, an earlier rounding) and
+# will never be bit-identical. Compare them the way a portfolio manager would: a name entering or leaving,
+# or a weight moving by more than half a percentage point, is a flip; anything smaller is noise.
+_FLIP_TOL = 0.005                    # 0.5 weight points
+
+
+def _maps_differ(a: dict, b: dict, tol: float = _FLIP_TOL) -> bool:
+    """Do these two (identifier -> weight) maps describe a MATERIALLY different book? A symbol missing from
+    one side counts as weight 0, so a dropped or added name flips as soon as it is worth more than `tol`."""
+    for k in set(a or {}) | set(b or {}):
+        if abs(float((a or {}).get(k, 0.0)) - float((b or {}).get(k, 0.0))) > tol:
+            return True
+    return False
+
+
 def _sleeve_flipped(db_key: str, ref_date, today_map: dict, sfera_root: Path | None = None) -> bool:
     """Did THIS strategy's OWN target change vs its previous stored date? The robust per-sleeve flip signal:
     it compares the strategy's own (identifier -> rounded weight) map today against the most recent prior date
@@ -655,7 +674,7 @@ def _sleeve_flipped(db_key: str, ref_date, today_map: dict, sfera_root: Path | N
                 return False if cur.fetchone() is None else True
         except Exception:  # noqa: BLE001 - can't compare -> don't silently freeze; fall back to rebalance
             return True
-    return prev_map != today_map
+    return _maps_differ(prev_map, today_map)
 
 
 # per-symbol EODHD price currency (e.g. GBX for LSE pence) — used to convert the sfera EOD close to USD.
@@ -993,9 +1012,14 @@ async def _run(args: argparse.Namespace) -> int:
     for _c, _tm in sleeve_today.items():
         if _c in _executed:
             _was = sleeve_flip.get(_c)
-            sleeve_flip[_c] = (_tm != _executed[_c])
+            sleeve_flip[_c] = _maps_differ(_tm, _executed[_c])
             if _c in sleeve_prev:
                 sleeve_prev[_c] = dict(_executed[_c])
+            if not sleeve_flip[_c] and _tm != _executed[_c]:
+                _mx = max((abs(float(_tm.get(k, 0.0)) - float(_executed[_c].get(k, 0.0)))
+                           for k in set(_tm) | set(_executed[_c])), default=0.0)
+                print(f"  HELD {_c}: target differs from the executed book by at most {_mx * 100:.2f}pp "
+                      f"(tolerance {_FLIP_TOL * 100:.1f}pp) — rounding, not a rebalance; no orders.")
             if sleeve_flip[_c] != _was:
                 print(f"  FLIP {_c}: {'PENDING — target differs from the last EXECUTED book (not yet traded)' if sleeve_flip[_c] else 'cleared — target already executed'}"
                       f"{'' if sleeve_flip[_c] else ' (day-over-day test disagreed; executed state wins)'}")
@@ -1113,7 +1137,7 @@ async def _run(args: argparse.Namespace) -> int:
                 else:
                     _executed.pop(_c, None)
                 if _c in sleeve_today:
-                    sleeve_flip[_c] = (_c not in _executed) or (sleeve_today[_c] != _executed[_c])
+                    sleeve_flip[_c] = (_c not in _executed) or _maps_differ(sleeve_today[_c], _executed[_c])
                 print(f"    -> {_c}: executed state rolled back to {_prev or 'unknown'}; flip "
                       f"{'PENDING — re-issuing today' if sleeve_flip.get(_c) else 'not pending'}")
         else:
