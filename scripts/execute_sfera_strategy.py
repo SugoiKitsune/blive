@@ -269,6 +269,16 @@ def _load_executed_targets(account: str) -> dict[str, dict]:
         return {}
 
 
+def _load_executed_compositions(account: str) -> dict[str, str]:
+    """{sleeve code: composition_date} — which DECISION each sleeve was last traded into. Recorded on submit
+    next to the weight map, and compared instead of it wherever sfera publishes a rebalance state."""
+    try:
+        rec = json.loads(_EXEC_STATE_PATH.read_text()).get(account) or {}
+        return {k: str(v) for k, v in (rec.get("compositions") or {}).items() if v}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 _EXEC_HISTORY_PATH = Path.home() / ".blive" / "executed_history.jsonl"
 
 
@@ -320,7 +330,8 @@ def _settle_pending(account: str, rollback: dict[str, dict | None]) -> None:
 
 
 def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None = None,
-                      pending: dict | None = None, prev_targets: dict | None = None) -> None:
+                      pending: dict | None = None, prev_targets: dict | None = None,
+                      compositions: dict[str, str] | None = None) -> None:
     """Stamp the submit — and, per sleeve, the target it is now rebalanced to.
 
     That per-sleeve map is what makes a flip robust to WHEN the executor runs. The day-over-day test
@@ -341,8 +352,12 @@ def _record_execution(account: str, plan: str, sleeves: dict[str, dict] | None =
         merged = dict(prev.get("sleeves") or {})
         if sleeves:
             merged.update(sleeves)
+        merged_comp = dict(prev.get("compositions") or {})
+        if compositions:
+            merged_comp.update({k: str(v) for k, v in compositions.items() if v})
         data[account] = {"date": date.today().isoformat(), "plan": plan,
-                         "time": datetime.now(tz=timezone.utc).isoformat(), "sleeves": merged}
+                         "time": datetime.now(tz=timezone.utc).isoformat(), "sleeves": merged,
+                         "compositions": merged_comp}
         if sleeves and merged != (prev.get("sleeves") or {}):
             _append_executed_history(account, merged, f"submit {plan}")
         if pending:
@@ -647,6 +662,30 @@ def _sleeve_prev_map(db_key: str, ref_date, sfera_root: Path | None = None) -> d
 _FLIP_TOL = 0.005                    # 0.5 weight points
 
 
+def _rebalance_state(db_key: str, sfera_root: Path | None = None) -> dict | None:
+    """sfera's OWN answer to "when was this book last decided, and when is the next one due?"
+    (strategy.rebalance_state, written by the strategy right after it publishes its weights).
+
+    This is the flip signal that should be used wherever it exists. Comparing weight MAPS — even with a
+    tolerance — asks a question the data cannot answer cleanly: eu_div_income republishes its entire
+    history every run, so an upstream restatement moves every number by a basis point without anything
+    having been decided. A rebalance is an EVENT. `composition_date` is its date: it moves when the
+    strategy actually chooses a new book, and stays put while data is late (the strategy defers the
+    month), so a delayed feed produces no churn — only an "overdue" next_expected."""
+    try:
+        import psycopg
+        with psycopg.connect(_pg_conn_str(sfera_root), connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("SELECT composition_date, next_expected, frequency, note, as_of "
+                        "FROM strategy.rebalance_state WHERE strategy = %s", (db_key,))
+            r = cur.fetchone()
+    except Exception:  # noqa: BLE001 - table absent / DB down -> caller falls back to the map comparison
+        return None
+    if not r:
+        return None
+    return {"composition_date": str(r[0]), "next_expected": str(r[1]) if r[1] else None,
+            "frequency": r[2], "note": r[3], "as_of": str(r[4])}
+
+
 def _maps_differ(a: dict, b: dict, tol: float = _FLIP_TOL) -> bool:
     """Do these two (identifier -> weight) maps describe a MATERIALLY different book? A symbol missing from
     one side counts as weight 0, so a dropped or added name flips as soon as it is worth more than `tol`."""
@@ -887,6 +926,7 @@ async def _run(args: argparse.Namespace) -> int:
             sleeve_weights: dict[str, dict] = {}
             sleeve_prev: dict[str, dict | None] = {}
             sleeve_today: dict[str, dict] = {}         # code -> today's rounded map (for the executed-state flip test)
+            sleeve_state: dict[str, dict | None] = {}  # code -> sfera's published rebalance state (the real flip signal)
             total_budget = Decimal("0")
             oldest: date | None = None
             labels: list[str] = []
@@ -901,6 +941,7 @@ async def _run(args: argparse.Namespace) -> int:
                 _tmap = {s: round(float(wt), 4) for s, wt in w_i.items() if wt != 0 and s != "CASH"}
                 sleeve_universes[code_i] = _sleeve_universe(dbk_i, Path(args.sfera_root)) or set(_tmap)
                 sleeve_flip[code_i] = _sleeve_flipped(dbk_i, d_i, _tmap, Path(args.sfera_root))
+                sleeve_state[code_i] = _rebalance_state(dbk_i, Path(args.sfera_root))
                 sleeve_budget[code_i] = b
                 sleeve_weights[code_i] = {s: wt for s, wt in w_i.items() if s != "CASH"}
                 sleeve_prev[code_i] = _sleeve_prev_map(dbk_i, d_i, Path(args.sfera_root))
@@ -945,6 +986,7 @@ async def _run(args: argparse.Namespace) -> int:
         _tmap = {s: round(float(w), 4) for s, w in weights.items() if w != 0 and s != "CASH"}
         sleeve_universes = {code: (_sleeve_universe(db_key, Path(args.sfera_root)) or set(_tmap))}
         sleeve_flip = {code: _sleeve_flipped(db_key, signal_date, _tmap, Path(args.sfera_root))}
+        sleeve_state = {code: _rebalance_state(db_key, Path(args.sfera_root))}
         sleeve_band = {}                              # single-strategy run: --rebalance-band applies as-is
         sleeve_hold_drift = set()
         sleeve_budget, sleeve_weights, sleeve_prev = {}, {}, {}   # rotation re-blend is portfolio-mode only
@@ -1009,7 +1051,29 @@ async def _run(args: argparse.Namespace) -> int:
     # traded. The same map is what the sleeve HOLDS going into today, so the rotation re-blend values the
     # right positions even when execution is late (yesterday's ROW is already the new target by then).
     _executed = _load_executed_targets(credentials.account_id)
+    _exec_comp = _load_executed_compositions(credentials.account_id)
+    # DECISION DATE beats weight comparison wherever sfera publishes one (strategy.rebalance_state).
+    # "Has this sleeve been traded into the book that is currently in force?" is answerable exactly; "do
+    # these two float maps look the same?" is not. A late feed keeps composition_date where it is (the
+    # strategy defers the month) so nothing churns, and next_expected goes overdue where it can be seen.
+    for _c, _st in (sleeve_state or {}).items():
+        if not _st or not _st.get("composition_date"):
+            continue
+        _comp, _done = _st["composition_date"], _exec_comp.get(_c)
+        _due = f", next due {_st['next_expected']}" if _st.get("next_expected") else ""
+        if _done is None:
+            print(f"  {_c}: book decided {_comp}{_due} — this account has no record of trading into it "
+                  f"(falling back to the weight comparison)")
+            continue
+        sleeve_flip[_c] = (_comp != _done)
+        print(f"  {_c}: book decided {_comp}, account executed {_done}{_due} -> "
+              f"{'REBALANCE DUE' if sleeve_flip[_c] else 'already traded into it — HOLD'}"
+              f"{' [' + _st['note'] + ']' if _st.get('note') else ''}")
+        if _c in sleeve_prev and _c in _executed:
+            sleeve_prev[_c] = dict(_executed[_c])
     for _c, _tm in sleeve_today.items():
+        if _c in (sleeve_state or {}) and (sleeve_state[_c] or {}).get("composition_date") and _c in _exec_comp:
+            continue                                  # decided above, by date
         if _c in _executed:
             _was = sleeve_flip.get(_c)
             sleeve_flip[_c] = _maps_differ(_tm, _executed[_c])
@@ -1465,7 +1529,9 @@ async def _run(args: argparse.Namespace) -> int:
             if args.submit:
                 # Everything held on a SUBMIT run = the account is at today's target for every sleeve.
                 # Record it, so the executed-target state exists even before the first flip is traded.
-                _record_execution(credentials.account_id, code, sleeves=sleeve_today)
+                _record_execution(credentials.account_id, code, sleeves=sleeve_today,
+                                  compositions={c: (st or {}).get("composition_date")
+                                                for c, st in (sleeve_state or {}).items()})
             await broker.disconnect()
             return 0
     if flipped:
@@ -1666,7 +1732,9 @@ async def _run(args: argparse.Namespace) -> int:
         # record is what lets the NEXT run check the account actually moved and roll the sleeve back if not.
         _record_execution(credentials.account_id, code,
                           sleeves=(sleeve_today if rejected == 0 else None),
-                          pending=_placed, prev_targets=_prev_for_pending)
+                          pending=_placed, prev_targets=_prev_for_pending,
+                          compositions=({c: (st or {}).get("composition_date")
+                                         for c, st in (sleeve_state or {}).items()} if rejected == 0 else None))
     _release_run_lock()
     print(f"\n=== Done: filled={filled}  canceled={canceled}  rejected={rejected}  risk-blocked={risk_blocked} ===")
     await broker.disconnect()
