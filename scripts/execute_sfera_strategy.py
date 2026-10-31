@@ -573,7 +573,7 @@ def _order_summary_rows(target_weights, prices, positions, orders, sym_origin, *
         if o is not None:
             side = str(o.side.value).upper()
             qty = float(o.quantity)
-            _lb = limit_band * _LEVERAGE.get(s, 1.0)
+            _lb = float(_collar(s, Decimal(str(limit_band))))   # the SAME capped collar the order carries
             lim = (px * (1 + _lb) if side == "BUY" else px * (1 - _lb)) if is_limit else None
             notional = qty * usd_px                       # USD notional (local price × per-leg FX)
         else:
@@ -1127,13 +1127,27 @@ async def _run(args: argparse.Namespace) -> int:
     # identity (the same one that opened the position), so each held leg maps back onto its target.
     _sym_conid = {getattr(rp.contract, "symbol", ""): int(getattr(rp.contract, "conId", 0) or 0)
                   for rp in client.ib.positions() if getattr(rp.contract, "conId", 0)}
+    # A leg a sleeve ROTATED OUT of today is no longer in `weights`, so it was never re-keyed: it stayed under
+    # IB's bare symbol ("AKRBP"), fell outside `prices` and therefore outside the target, and got no SELL —
+    # on 2026-10-30 R05 dropped AKRBP/DANSKE/HFD and the plan showed them "— HOLD $0". Re-key those too: any
+    # ever-targeted name the account still holds, matched on its separator-free ticker (TRMD-A ~ "TRMD.A").
+    # Only held names are resolved — R05 has ever targeted ~250 names, the account holds a dozen.
+    def _bare(t: str) -> str:
+        return "".join(ch for ch in str(t).upper() if ch.isalnum())
+    _held_bare = {_bare(s) for s in _sym_conid}
+    _exited = sorted(s for u in sleeve_universes.values() for s in u
+                     if s not in weights and _bare(s.rpartition(".")[0] or s) in _held_bare)
+    _ensure_eu_instruments(_exited, Path(args.sfera_root))
     _conid_ticker: dict[int, str] = {}
-    for _s in weights:
+    for _s in [*weights, *_exited]:
         _inst = _CATALOGUE.get(_s)
         if _inst is None:
             continue
         try:
-            _conid_ticker[await resolver.resolve(_inst)] = _s   # cached; the eligibility probe reuses it
+            # setdefault: TODAY's target owns a contract. Two listings of one ISIN resolve to one conId
+            # (REP.MC / REP.XETRA); an old listing must not steal the held position from today's target,
+            # or the target reads unheld and is bought a second time.
+            _conid_ticker.setdefault(await resolver.resolve(_inst), _s)   # cached; the probe reuses it
         except Exception:  # noqa: BLE001 - an unresolved leg just stays under its IB symbol
             pass
     positions: dict[str, Position] = {}
@@ -1286,8 +1300,12 @@ async def _run(args: argparse.Namespace) -> int:
                     pass
             return mv
         new_budget = dict(sleeve_budget)
-        for code_x, flipped in sleeve_flip.items():
-            if not flipped or code_x not in sleeve_budget:
+        # EVERY sleeve, not only the flipped ones. A HOLDING sleeve left at its fixed budget was topped back up
+        # to it whenever a sleeve SHARING its leg flipped: on 2026-10-30 R04's 3% BIL trim re-blended TQQQ,
+        # R02 (held, TQQQ -28% since entry) was re-sized GBP 42.6k -> 50k, and the plan BOUGHT 129 TQQQ instead
+        # of selling R04's ~30. A held sleeve rides the market; its capital is what it holds.
+        for code_x in sleeve_flip:
+            if code_x not in sleeve_budget:
                 continue
             mv_usd = _sleeve_mv_usd(code_x)
             if mv_usd <= 0:
@@ -1375,7 +1393,10 @@ async def _run(args: argparse.Namespace) -> int:
         # paper account, a position outside this strategy's book (e.g. R02's TQQQ, R04's BIL when running R05)
         # is INVISIBLE — never flattened. Each strategy sizes against ITS allocated AUM, not a % of the whole
         # account (ForgeFolio model). Foreign holdings are left exactly as-is.
-        current_positions={s: positions[s] for s in positions if s in prices and s in weights},
+        # ...EXCEPT a leg one of THIS run's sleeves rotated out of (_exited): it is ours, not foreign, and its
+        # target is 0 — without it here the exit is never sold (R05's AKRBP/DANSKE/HFD, BWO/ENG/ZIG).
+        current_positions={s: positions[s] for s in positions
+                           if s in prices and (s in weights or s in _exited)},
         instrument_resolver=lambda sym: _CATALOGUE[sym],
         price_lookup=lambda inst: _px_usd(_id_by_inst.get(inst, inst.symbol)),   # USD (per-leg FX) for sizing
         strategy_id=code,
