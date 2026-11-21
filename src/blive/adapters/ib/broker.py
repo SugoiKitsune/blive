@@ -1408,10 +1408,10 @@ def _blive_to_ib_order(order: Order) -> ib_async.Order:
     Supports ``MKT``, ``LMT``, ``STP``, ``STP_LMT`` (M2-IB.4a) and
     ``ADAPTIVE_MKT`` (M2-IB.6.2c — IBALGO Adaptive variant of MKT that
     bypasses IB's regulatory disruptive-orders price-cap on volatile /
-    leveraged products; see warning 2161 in INV-14 v0.7). ``MOC`` /
-    ``LOC`` / ``OPG`` are valid blive types per [DD-1 §1.1](../../../../docs/dd/domain_objects.md#11-enums)
-    but raise here pending v1.1 — they require additional IB plumbing
-    (``goodAfterTime``, ``tif="OPG"``, etc.).
+    leveraged products; see warning 2161 in INV-14 v0.7), and ``MOC``
+    (closing auction). A ``MKT`` order with ``TimeInForce.OPG`` is the
+    opening-auction order. ``LOC`` is a valid blive type per [DD-1 §1.1](../../../../docs/dd/domain_objects.md#11-enums)
+    but raises here: it needs a limit price that ``Order`` does not allow it.
     """
     action = order.side.value  # OrderSide.BUY → "BUY"; OrderSide.SELL → "SELL"
     qty = float(order.quantity)
@@ -1463,11 +1463,18 @@ def _blive_to_ib_order(order: Order) -> ib_async.Order:
             lmtPrice=float(order.limit_price),
             stopPrice=float(order.stop_price),
         )
+    elif order.order_type == OrderType.MOC:
+        # Market-on-close: joins the listing exchange's closing auction and
+        # fills at the official close. IB takes it as ``orderType="MOC"`` with
+        # a DAY time-in-force. The opening-auction counterpart needs no branch
+        # of its own: a ``MKT`` order with ``TimeInForce.OPG`` is IB's
+        # market-on-open, and the tif is copied through below.
+        ib_order = ib_async.Order(action=action, totalQuantity=qty, orderType="MOC")
     else:
         raise NotImplementedError(
-            f"IBBroker.submit does not support order_type={order.order_type.value} "
-            f"at M2-IB.6.2c. Supported: MKT, ADAPTIVE_MKT, LMT, STP, STP_LMT. "
-            f"MOC/LOC/OPG land at v1.1 if a strategy needs them."
+            f"IBBroker.submit does not support order_type={order.order_type.value}. "
+            f"Supported: MKT, ADAPTIVE_MKT, LMT, STP, STP_LMT, MOC. "
+            f"LOC needs a limit price the Order type does not yet allow for it."
         )
 
     ib_order.tif = tif

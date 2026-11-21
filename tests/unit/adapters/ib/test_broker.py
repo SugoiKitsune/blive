@@ -1285,11 +1285,11 @@ async def test_submit_unsupported_order_type_raises(
     rate_limiter: TokenBucketRateLimiter,
     clock: SimClock,
 ) -> None:
-    """MOC/LOC/OPG raise NotImplementedError pending v1.1."""
+    """LOC raises NotImplementedError: it needs a limit price Order does not allow it."""
     broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
     await broker.connect()
-    order = _build_order(order_type=OrderType.MOC, limit_price=None)
-    with pytest.raises(NotImplementedError, match="MOC"):
+    order = _build_order(order_type=OrderType.LOC, limit_price=None)
+    with pytest.raises(NotImplementedError, match="LOC"):
         await broker.submit(order)
 
 
@@ -1633,3 +1633,37 @@ async def test_connect_uses_zero_interval_for_short_test_runs(
         assert broker._account_update_task is not None  # type: ignore[attr-defined]
     finally:
         await broker.disconnect()
+
+
+# --- Auction orders: closing auction (MOC) and opening auction (MKT + OPG) ---
+
+
+def test_moc_order_maps_to_ib_market_on_close() -> None:
+    """OrderType.MOC becomes an IB ``MOC`` order for the closing auction."""
+    from blive.adapters.ib.broker import _blive_to_ib_order
+
+    ib_order = _blive_to_ib_order(
+        _build_order(order_type=OrderType.MOC, limit_price=None, quantity=Decimal("7"))
+    )
+    assert ib_order.orderType == "MOC"
+    assert ib_order.action == "BUY"
+    assert ib_order.totalQuantity == 7.0
+    assert ib_order.tif == "DAY"
+
+
+def test_mkt_order_with_opg_tif_maps_to_ib_market_on_open() -> None:
+    """A MKT order with TimeInForce.OPG is the opening-auction (market-on-open) order."""
+    from blive.adapters.ib.broker import _blive_to_ib_order
+
+    ib_order = _blive_to_ib_order(
+        _build_order(
+            order_type=OrderType.MKT,
+            side=OrderSide.SELL,
+            limit_price=None,
+            quantity=Decimal("7"),
+            tif=TimeInForce.OPG,
+        )
+    )
+    assert ib_order.orderType == "MKT"
+    assert ib_order.action == "SELL"
+    assert ib_order.tif == "OPG"
