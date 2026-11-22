@@ -365,8 +365,13 @@ class IBBroker:
         ib_positions = await self._client.ib.reqPositionsAsync()
         now = self._clock.now()
         out: list[Position] = []
+        acct = self._client.credentials.account_id
         for ib_pos in ib_positions:
             if ib_pos is None:
+                continue
+            # A login can serve SEVERAL accounts (the live one serves U3481003 + U23454308): positions of any other
+            # account are not ours to size against or sell.
+            if getattr(ib_pos, "account", None) and ib_pos.account != acct:
                 continue
             try:
                 position = self._parse_ib_position(ib_pos, updated_at=now)
@@ -480,6 +485,9 @@ class IBBroker:
         # (M5) can correlate persisted-state events back to the originating
         # blive order without depending on this in-process map.
         ib_order.orderRef = str(client_order_id)
+        # Name the account on every order: a multi-account login rejects an order without one (IB-435 "You must
+        # specify an account"), and naming it means the order can only ever land in the configured account.
+        ib_order.account = self._client.credentials.account_id
 
         await self._client.rate_limiter.acquire("global")
         # ib_async.IB.placeOrder is sync (returns a Trade immediately and

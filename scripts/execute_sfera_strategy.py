@@ -195,9 +195,15 @@ def _ensure_eu_instruments(symbols, sfera_root=None) -> None:
 # rotation tree on TQQQ/TECL/UVXY/TECS.)
 _STRATEGIES: dict[str, dict] = {
     "R01": {"db_key": "r_lev_001", "slot": None,    "name": "SMA-200 trend (TQQQ/IEF)",             "status": "retired"},
-    "R02": {"db_key": "r_lev_002", "slot": "S14",   "name": "Conditional rotation (qc_cash)",       "status": "live"},
+    # 2026-11-21: paper + live S14 switched R02 -> R02v2 (R02 + breadth/valuation gates); v1 = shadow reference.
+    "R02": {"db_key": "r_lev_002", "slot": None,    "name": "Conditional rotation (qc_cash)",       "status": "shadow"},
+    "R02v2": {"db_key": "r_lev_002_v2", "slot": "S14", "name": "Conditional rotation + v2 gates (breadth, tech valuation)",
+              "status": "live", "universe": ["TQQQ", "TECL", "UVXY", "TECS"]},
     "R03": {"db_key": "r_lev_003", "slot": None,    "name": "Keeper (rotation + vol/chop overlays)", "status": "candidate"},
-    "R04": {"db_key": "r_lev_004", "slot": "S14v2", "name": "Sized rotation (+iv9M/COT)",            "status": "candidate"},
+    # 2026-11-21: paper moved R04 -> R04v2; v1 kept as a shadow reference (still resolvable, not deployed).
+    "R04": {"db_key": "r_lev_004", "slot": None,    "name": "Sized rotation (+iv9M/COT)",            "status": "shadow"},
+    "R04v2": {"db_key": "r_lev_004_v2", "slot": None, "name": "Sized rotation + v2 gates (breadth, tech valuation)",
+              "status": "paper", "universe": ["TQQQ", "TECL", "UVXY", "TECS", "BIL"]},
     "R05": {"db_key": "eu_div_income", "slot": None, "name": "EU dividend income (treaty-0%, EU stocks)", "status": "candidate"},
 }
 _SLOT_TO_RCODE = {v["slot"]: k for k, v in _STRATEGIES.items() if v["slot"]}
@@ -405,6 +411,29 @@ def _us_session_open_now() -> bool:
 _DEFAULT_SFERA_ROOT = Path(
     r"C:\Personal\Business & Investments\Python codes\sfera"
 )
+
+# LIVE credentials live in their OWN directory, never in the paper ib.env: a paper run can then never pick up the
+# live port by accident, and a live run reads nothing from the environment (env={} below) that a paper shell set.
+_LIVE_SECRETS_DIR = Path.home() / ".blive" / "secrets" / "live"
+
+
+def _actual_sleeve_value(slot: str, sfera_root: Path, max_age_days: int = 4) -> tuple[float, str, date]:
+    """(total_value, ccy, date) of a ForgeFolio slot from the latest ACTUAL:<slot> row of actual_nav.csv.
+
+    That is the sleeve's own capital — positions + its cash — as ForgeFolio's ledger carries it, so a live sleeve
+    sitting in cash after a sell is sized to what it actually has, not to a fixed allocation or a slice of the whole
+    (shared) account. Refuses a stale row: sizing real money off a week-old value is a bug, not a fallback."""
+    path = sfera_root.parent / "lab" / "reporting" / "nav" / "actual_nav.csv"
+    df = pd.read_csv(path)
+    df = df[df["book"] == f"ACTUAL:{slot}"]
+    if df.empty:
+        raise WeightLoadError(f"no ACTUAL:{slot} rows in {path}")
+    row = df.sort_values("date").iloc[-1]
+    d = date.fromisoformat(str(row["date"])[:10])
+    age = (date.today() - d).days
+    if age > max_age_days:
+        raise WeightLoadError(f"ACTUAL:{slot} value is {age}d old ({d}) — re-export ForgeFolio before a live run")
+    return float(row["total_value"]), str(row["ccy"]), d
 
 
 # --- Weight sources ----------------------------------------------------------
@@ -992,6 +1021,36 @@ async def _run(args: argparse.Namespace) -> int:
         sleeve_budget, sleeve_weights, sleeve_prev = {}, {}, {}   # rotation re-blend is portfolio-mode only
         sleeve_today = {code: _tmap}
 
+    # --- LIVE gate (real money): narrow on purpose — one live strategy, its own slot's capital, nothing else. ---
+    if args.live:
+        if args.portfolio:
+            print("\nFAILED: --live runs ONE strategy (--strategy); blended --portfolio is paper-only.")
+            return 2
+        meta = _STRATEGIES[code]
+        if meta.get("status") != "live" or not meta.get("slot"):
+            print(f"\nFAILED: {code} is not a LIVE strategy (status={meta.get('status')!r}, slot={meta.get('slot')!r}).")
+            return 2
+        if not args.budget_from_actual and not (args.budget and args.budget > 0):
+            print("\nFAILED: --live needs the sleeve's capital: --budget-from-actual <SLOT> or an explicit --budget "
+                  "(a --nav-slice of a SHARED live account would size against other strategies' money).")
+            return 2
+        if args.budget_from_actual and args.budget_from_actual != meta["slot"]:
+            print(f"\nFAILED: --budget-from-actual {args.budget_from_actual} but {code} trades slot {meta['slot']}.")
+            return 2
+        # a single-asset hold-until-flip sleeve, exactly as R02 runs on paper (DEPLOYMENTS hold_drift=True): it trades
+        # on its own flip or to establish an empty position — never on price/FX drift.
+        sleeve_hold_drift.add(code)
+        if meta.get("universe"):
+            sleeve_universes[code] = set(sleeve_universes.get(code, set())) | set(meta["universe"])
+    if args.budget_from_actual:
+        try:
+            _bv, _bccy, _bd = _actual_sleeve_value(args.budget_from_actual, Path(args.sfera_root))
+        except (WeightLoadError, OSError, KeyError, ValueError) as exc:
+            print(f"\nFAILED: --budget-from-actual: {exc}")
+            return 2
+        args.budget, args.budget_ccy = _bv, _bccy.lower()
+        print(f"  budget: ForgeFolio {args.budget_from_actual} value {_bv:,.2f} {_bccy} (as of {_bd})")
+
     _ensure_eu_instruments(weights, Path(args.sfera_root))   # register EU equities (R05) in _CATALOGUE before sizing
     tradable_targets, cash_residual = _print_weights(weights, signal_date, source)
     if not tradable_targets:
@@ -1037,9 +1096,14 @@ async def _run(args: argparse.Namespace) -> int:
 
     # --- 3. Connect to IB (detect-at-connect) -------------------------------
     try:
-        credentials = IBCredentials.load()
+        credentials = (IBCredentials.load(secrets_dir=_LIVE_SECRETS_DIR, env={}) if args.live
+                       else IBCredentials.load())
     except (CredentialsMissing, ValueError) as exc:
-        print(f"\nFAILED: IB credentials: {exc}")
+        print(f"\nFAILED: IB credentials{' (LIVE: ' + str(_LIVE_SECRETS_DIR / 'ib.env') + ')' if args.live else ''}: {exc}")
+        return 2
+    if args.live == credentials.account_id.upper().startswith("DU"):
+        print(f"\nFAILED: {'--live' if args.live else 'paper'} run configured for account {credentials.account_id} "
+              f"— live accounts are U…, paper accounts DU…; refusing a crossed configuration.")
         return 2
 
     # --- FLIP = "target differs from what this sleeve was LAST REBALANCED TO on this account" ---------------
@@ -1098,14 +1162,25 @@ async def _run(args: argparse.Namespace) -> int:
     market_data = IBMarketData(client=client, resolver=resolver, clock=clock)
     broker = IBBroker(client=client, resolver=resolver, clock=clock)
 
-    print("\n=== Connecting to IB Paper ===")
+    print(f"\n=== Connecting to IB {'*** LIVE ***' if args.live else 'Paper'} ({credentials.host}:{credentials.port}) ===")
     try:
         await broker.connect()
     except IBConnectionError as exc:
         print(f"\nFAILED on connect: {exc}")
-        print("  (is IB Gateway running on the configured host/port, paper, API enabled?)")
+        print(f"  (is IB Gateway running on the configured host/port, {'LIVE' if args.live else 'paper'}, API enabled?)")
         return 3
     print(f"  connected: {broker.is_connected}")
+    # The Gateway decides which account we are really talking to, not our config. A paper profile pointed at a live
+    # Gateway (or the reverse) must stop here, before a single position is read.
+    try:
+        _managed = [a.strip() for a in client.ib.managedAccounts() if a.strip()]   # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        _managed = []
+    if credentials.account_id not in _managed or any(a.upper().startswith("DU") == args.live for a in _managed):
+        print(f"\nFAILED: Gateway serves accounts {_managed or '(none reported)'}, configured "
+              f"{credentials.account_id} ({'LIVE' if args.live else 'paper'}) — refusing.")
+        await broker.disconnect()
+        return 3
     await _drain_startup_events(broker)
 
     snap = await broker.account_snapshot()
@@ -1126,7 +1201,7 @@ async def _run(args: argparse.Namespace) -> int:
     # so a raw-symbol key makes the sizer think the book is unheld and DOUBLE-BUYS it. conId is the stable
     # identity (the same one that opened the position), so each held leg maps back onto its target.
     _sym_conid = {getattr(rp.contract, "symbol", ""): int(getattr(rp.contract, "conId", 0) or 0)
-                  for rp in client.ib.positions() if getattr(rp.contract, "conId", 0)}
+                  for rp in client.ib.positions(credentials.account_id) if getattr(rp.contract, "conId", 0)}
     # A leg a sleeve ROTATED OUT of today is no longer in `weights`, so it was never re-keyed: it stayed under
     # IB's bare symbol ("AKRBP"), fell outside `prices` and therefore outside the target, and got no SELL —
     # on 2026-10-30 R05 dropped AKRBP/DANSKE/HFD and the plan showed them "— HOLD $0". Re-key those too: any
@@ -1166,6 +1241,9 @@ async def _run(args: argparse.Namespace) -> int:
     pending_disp: dict[int, str] = {}
     for t in await client.ib.reqAllOpenOrdersAsync():           # raw IB trades carry conId; domain Order does not
         if t is None or getattr(t, "contract", None) is None:
+            continue
+        _oacct = getattr(getattr(t, "order", None), "account", "") or ""
+        if _oacct and _oacct != credentials.account_id:          # another account on this login — not ours to net
             continue
         conid = int(getattr(t.contract, "conId", 0) or 0)
         if not conid:
@@ -1572,7 +1650,85 @@ async def _run(args: argparse.Namespace) -> int:
                       _order_summary_rows(target_weights, prices, positions, candidate_orders, sym_origin,
                                           limit_band=float(args.limit_band), is_limit=is_limit), **_emeta)
 
+    # --- ORDER FENCE: every order must belong to this run's sleeve(s) and be sized like one. ----------------
+    # The sizer already only sees the sleeve's own positions; this re-checks the OUTPUT, so a future change upstream
+    # cannot quietly send a SELL of another strategy's holding (S15's EU names on the shared live account) or a
+    # 10x order from a unit/FX bug. Any violation blocks the whole submit.
+    _fence_universe = set(weights) | (set().union(*sleeve_universes.values()) if sleeve_universes else set())
+    _fence: list[str] = []
+    _aum_usd = float(pot_usd)
+    for o in candidate_orders:
+        _fs = _id_by_inst.get(o.instrument, o.instrument.symbol)
+        if _fs not in _fence_universe:
+            _fence.append(f"{o.side.value} {float(o.quantity):.0f} {_fs}: not in the sleeve universe {sorted(_fence_universe)}")
+        try:
+            _notional = float(o.quantity) * float(_px_usd(_fs))
+        except Exception:  # noqa: BLE001
+            _fence.append(f"{o.side.value} {_fs}: cannot price the order to check its size")
+            continue
+        if _aum_usd > 0 and _notional > args.max_order_frac * _aum_usd:
+            _fence.append(f"{o.side.value} {float(o.quantity):.0f} {_fs} = ${_notional:,.0f} > "
+                          f"{args.max_order_frac:.2f} x AUM ${_aum_usd:,.0f}")
+    if _fence:
+        print("\n  ORDER FENCE — " + ("BLOCKING the submit:" if args.submit else "would block a submit:"))
+        for f in _fence:
+            print(f"    x {f}")
+        if args.submit:
+            await broker.disconnect()
+            return 5
+
+    # --- WHAT-IF: IB evaluates each order (margin, commission, permission warnings); nothing is transmitted. ---
+    if args.what_if:
+        from blive.adapters.ib.broker import _blive_to_ib_order  # noqa: PLC2701 - script-level reuse of the mapper
+        print("\n=== WHAT-IF (IB evaluates, nothing is placed) ===")
+        _wi_errs: list[tuple[int, str]] = []
+        def _wi_err(reqId, errorCode, errorString, *rest):  # noqa: ANN001
+            _wi_errs.append((int(errorCode), str(errorString)))
+        client.ib.errorEvent += _wi_err   # noqa: SLF001
+        for o in candidate_orders:
+            _ws = _id_by_inst.get(o.instrument, o.instrument.symbol)
+            probe = _make_order(o, order_type=OrderType.MKT, tif=TimeInForce.DAY, limit_price=None, label="whatif")
+            _wi_errs.clear()
+            _ibo = _blive_to_ib_order(probe)
+            _ibo.account = credentials.account_id              # multi-account login: IB-435 without it
+            try:
+                # IB answers a rejected what-if (e.g. 321 Read-Only API) with an error and NO order state, and
+                # ib_async then waits forever — cap it, so a read-only Gateway reads as a message, not a hang.
+                st = await asyncio.wait_for(
+                    client.ib.whatIfOrderAsync(resolver.to_contract(o.instrument), _ibo),  # noqa: SLF001
+                    timeout=15)
+            except asyncio.TimeoutError:
+                st = None
+                _wi_errs.append((-1, "no answer from IB within 15s"))
+            except Exception as exc:  # noqa: BLE001
+                st = None
+                _wi_errs.append((-1, f"{type(exc).__name__}: {exc}"))
+            if any(c == 321 and "read-only" in m.lower() for c, m in _wi_errs):
+                print(f"  {o.side.value} {float(o.quantity):.0f} {_ws}: REFUSED — the Gateway API is in READ-ONLY mode. "
+                      "Untick 'Read-Only API' (Gateway: Configure > Settings > API > Settings) — a submit would be "
+                      "rejected the same way.")
+                break
+            errs = "; ".join(f"IB-{c}: {m}" for c, m in _wi_errs if c not in (2100, 2104, 2106, 2107, 2108, 2158))
+            if st is not None and getattr(st, "initMarginChange", ""):
+                print(f"  {o.side.value} {float(o.quantity):.0f} {_ws}: init margin chg {st.initMarginChange} "
+                      f"maint chg {st.maintMarginChange} equity w/loan {st.equityWithLoanAfter} "
+                      f"commission {st.commission if st.commission < 1e300 else '?'} {st.commissionCurrency}"
+                      + (f"  WARNING: {st.warningText}" if getattr(st, "warningText", "") else "")
+                      + (f"  [{errs}]" if errs else ""))
+            else:
+                print(f"  {o.side.value} {float(o.quantity):.0f} {_ws}: NO evaluation returned"
+                      + (f"  [{errs}]" if errs else "  (IB gave no reason)"))
+        try:
+            client.ib.errorEvent -= _wi_err   # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            pass
+
     # --- 5. Dry-run vs submit ------------------------------------------------
+    if args.live and args.submit and args.confirm_account != credentials.account_id:
+        print(f"\nFAILED: LIVE submit to {credentials.account_id} needs --confirm-account {credentials.account_id} "
+              f"(got {args.confirm_account or 'nothing'}). Nothing submitted.")
+        await broker.disconnect()
+        return 2
     if not args.submit:
         print("\n=== DRY-RUN — nothing submitted. Re-run with --submit to place these orders. ===")
         await broker.disconnect()
@@ -1807,6 +1963,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--submit", action="store_true", help="actually place orders (default dry-run)")
     p.add_argument("--yes", action="store_true", help="skip interactive submit confirmation")
     p.add_argument("--example-equity", type=float, default=100_000.0, help="equity for --offline preview")
+    # --- LIVE account (real money). Off unless --live; see _LIVE_SECRETS_DIR + the guards in _run. ---
+    p.add_argument("--live", action="store_true",
+                   help="trade the LIVE account: credentials from ~/.blive/secrets/live/ib.env (live Gateway, port 4001). "
+                        "Single --strategy only, status 'live', budget required, connected account must match.")
+    p.add_argument("--confirm-account", default="",
+                   help="LIVE submit only: the live account id typed back (must equal the configured+connected account)")
+    p.add_argument("--budget-from-actual", default="",
+                   help="size from a ForgeFolio slot's current value: latest ACTUAL:<SLOT> total_value in "
+                        "lab/reporting/nav/actual_nav.csv (e.g. S14); sets --budget and --budget-ccy")
+    p.add_argument("--max-order-frac", type=float, default=1.10,
+                   help="refuse a submit if any single order's notional exceeds this fraction of the strategy AUM "
+                        "(default 1.10 — catches a sizing/FX/unit bug before it reaches the broker)")
+    p.add_argument("--what-if", action="store_true",
+                   help="ask IB to evaluate each sized order (margin, commission, permission warnings) WITHOUT placing it")
     p.add_argument("--event-wait-seconds", type=float, default=5.0,
                    help="per-order FSM drain HARD CAP (s). With settle_on_accepted the order returns as soon "
                         "as IB confirms it working; this is only the ceiling for a stuck/unacknowledged order.")
