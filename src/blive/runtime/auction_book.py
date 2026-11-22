@@ -18,9 +18,12 @@ Safety rules enforced here, not left to the caller:
 - **Fresh targets only.** A targets file is for one trading date and expires
   a few minutes after it was decided (:func:`check_fresh`).
 - **Inside the auction's order window only.** Orders are built only while the
-  auction still accepts them (:func:`require_window`).
+  auction still accepts them (:func:`require_entry_time`, :func:`require_window`).
 - **Never sell what the book did not buy.** Exit quantities are capped by both
   the book's own record and the broker's position (:func:`exit_orders`).
+
+Nothing about one book is fixed in code: its budget, its limits and its order
+windows are :class:`BookSettings`, read from a file next to the book's state.
 """
 
 from __future__ import annotations
@@ -69,6 +72,7 @@ class Targets:
     trade_date: date
     decided_at: datetime
     lines: tuple[TargetLine, ...]
+    session_close: datetime | None = None  # the day's closing time, if the file states it
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,12 +105,97 @@ class Window:
     end: time
 
 
-# Defaults. The closing auction stops taking market-on-close orders at 15:50
-# on NYSE and 15:55 on Nasdaq; the opening auction stops at 09:28. The windows
-# end early enough to leave the broker time to route.
-ENTRY_WINDOW = Window(start=time(15, 40), end=time(15, 49))
-EXIT_WINDOW = Window(start=time(4, 0), end=time(9, 25))
-MAX_TARGETS_AGE = timedelta(minutes=5)
+@dataclass(frozen=True, slots=True)
+class BookSettings:
+    """How one book is run. Every field has a default except the budget.
+
+    The entry window is counted back from the session's close, so it follows an
+    early close when the targets file states one. The defaults: the closing
+    auction stops taking market-on-close orders 10 minutes before the close on
+    NYSE and 5 minutes before on Nasdaq, and the opening auction stops at 09:28;
+    both windows end early enough to leave the broker time to route.
+    """
+
+    budget_usd: Decimal | None = None
+    max_names: int = 50
+    regular_close: time = time(16, 0)  # used when the targets file states no close
+    entry_opens_minutes_before_close: int = 20
+    entry_closes_minutes_before_close: int = 11
+    exit_window: Window = Window(start=time(4, 0), end=time(9, 25))
+    max_targets_age_seconds: int = 300
+    settle_seconds: float = 8.0
+
+    def __post_init__(self) -> None:
+        if self.budget_usd is not None and self.budget_usd <= 0:
+            raise AuctionBookError("settings: budget_usd must be positive")
+        if self.max_names <= 0:
+            raise AuctionBookError("settings: max_names must be positive")
+        if not self.entry_opens_minutes_before_close > self.entry_closes_minutes_before_close > 0:
+            raise AuctionBookError(
+                "settings: the entry window must open before it closes, and close before the session does"
+            )
+        if not self.exit_window.start < self.exit_window.end:
+            raise AuctionBookError("settings: exit_window must start before it ends")
+        if self.max_targets_age_seconds <= 0 or self.settle_seconds < 0:
+            raise AuctionBookError(
+                "settings: max_targets_age_seconds / settle_seconds out of range"
+            )
+
+    @property
+    def max_targets_age(self) -> timedelta:
+        return timedelta(seconds=self.max_targets_age_seconds)
+
+
+SETTINGS_KEYS: frozenset[str] = frozenset(BookSettings.__dataclass_fields__)
+
+
+def _clock_time(value: Any, name: str) -> time:
+    try:
+        return time.fromisoformat(str(value))
+    except ValueError as exc:
+        raise AuctionBookError(f"settings: {name} is not a time (HH:MM): {value!r}") from exc
+
+
+def parse_settings(payload: Mapping[str, Any]) -> BookSettings:
+    """Validate a settings file's content. Expected shape, every key optional::
+
+        {"budget_usd": 50000, "max_names": 50, "regular_close": "16:00",
+         "entry_opens_minutes_before_close": 20, "entry_closes_minutes_before_close": 11,
+         "exit_window": ["04:00", "09:25"], "max_targets_age_seconds": 300, "settle_seconds": 8}
+
+    An unknown key is an error: a misspelt setting must not fall back to its
+    default silently.
+    """
+    unknown = sorted(set(payload) - SETTINGS_KEYS)
+    if unknown:
+        raise AuctionBookError(f"settings: unknown keys {unknown}; known: {sorted(SETTINGS_KEYS)}")
+    values: dict[str, Any] = {}
+    for key, raw in payload.items():
+        if key == "budget_usd":
+            values[key] = None if raw is None else _decimal(raw, "settings.budget_usd")
+        elif key == "regular_close":
+            values[key] = _clock_time(raw, key)
+        elif key == "exit_window":
+            if not isinstance(raw, list) or len(raw) != 2:
+                raise AuctionBookError("settings: exit_window must be [start, end]")
+            values[key] = Window(start=_clock_time(raw[0], key), end=_clock_time(raw[1], key))
+        elif key == "settle_seconds":
+            values[key] = float(_decimal(raw, "settings.settle_seconds"))
+        else:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise AuctionBookError(f"settings: {key} must be a whole number: {raw!r}")
+            values[key] = raw
+    return BookSettings(**values)
+
+
+def load_settings(path: Path) -> BookSettings:
+    """The book's settings file, or the defaults if there is none."""
+    if not path.exists():
+        return BookSettings()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise AuctionBookError("settings: the file must hold one JSON object")
+    return parse_settings(payload)
 
 
 # --- Targets file -------------------------------------------------------------
@@ -129,12 +218,15 @@ def parse_targets(payload: Mapping[str, Any], *, max_names: int = 50) -> Targets
 
         {"schema": 1, "book_id": "...", "trade_date": "2026-11-23",
          "decided_at": "2026-11-23T20:46:02+00:00",
+         "session_close": "2026-11-23T16:00:00-05:00",
          "targets": [{"symbol": "ABC", "venue": "XNAS", "weight": 0.1,
                       "reference_price": 123.45}, ...]}
 
     ``weight`` is the share of the book's budget. Weights are positive and sum
     to at most 1. ``reference_price`` is the price the decision saw; it sizes
     the order (the auction price is not known when the order is sent).
+    ``session_close`` is optional: the day's closing time, for early closes.
+    It must carry a timezone and fall on ``trade_date``.
     """
     if payload.get("schema") != SCHEMA_VERSION:
         raise AuctionBookError(f"unsupported targets schema: {payload.get('schema')!r}")
@@ -148,6 +240,16 @@ def parse_targets(payload: Mapping[str, Any], *, max_names: int = 50) -> Targets
         raise AuctionBookError(f"trade_date / decided_at missing or malformed: {exc}") from exc
     if decided_at.tzinfo is None:
         raise AuctionBookError("decided_at must carry a timezone")
+    session_close: datetime | None = None
+    if payload.get("session_close") is not None:
+        try:
+            session_close = datetime.fromisoformat(str(payload["session_close"]))
+        except ValueError as exc:
+            raise AuctionBookError(f"session_close is malformed: {exc}") from exc
+        if session_close.tzinfo is None:
+            raise AuctionBookError("session_close must carry a timezone")
+        if session_close.astimezone(EXCHANGE_TZ).date() != trade_date:
+            raise AuctionBookError(f"session_close {session_close} is not on {trade_date}")
     raw = payload.get("targets")
     if not isinstance(raw, list) or not raw:
         raise AuctionBookError("targets is missing or empty")
@@ -174,7 +276,11 @@ def parse_targets(payload: Mapping[str, Any], *, max_names: int = 50) -> Targets
     if total > Decimal("1") + _WEIGHT_SUM_TOLERANCE:
         raise AuctionBookError(f"weights sum to {total}, above 1")
     return Targets(
-        book_id=book_id, trade_date=trade_date, decided_at=decided_at, lines=tuple(lines)
+        book_id=book_id,
+        trade_date=trade_date,
+        decided_at=decided_at,
+        lines=tuple(lines),
+        session_close=session_close,
     )
 
 
@@ -193,7 +299,7 @@ def require_paper_account(account_id: str) -> None:
         )
 
 
-def check_fresh(targets: Targets, now: datetime, *, max_age: timedelta = MAX_TARGETS_AGE) -> None:
+def check_fresh(targets: Targets, now: datetime, max_age: timedelta) -> None:
     """The file must be for today (exchange date) and decided within ``max_age`` before ``now``."""
     today = now.astimezone(EXCHANGE_TZ).date()
     if targets.trade_date != today:
@@ -203,6 +309,29 @@ def check_fresh(targets: Targets, now: datetime, *, max_age: timedelta = MAX_TAR
         raise AuctionBookError("targets were decided in the future")
     if age > max_age:
         raise AuctionBookError(f"targets are {age} old, older than {max_age}")
+
+
+def entry_window(targets: Targets, settings: BookSettings) -> tuple[datetime, datetime]:
+    """When closing-auction orders may be sent for ``targets``: [opens, closes), counted back from the close."""
+    close = targets.session_close or datetime.combine(
+        targets.trade_date, settings.regular_close, tzinfo=EXCHANGE_TZ
+    )
+    return (
+        close - timedelta(minutes=settings.entry_opens_minutes_before_close),
+        close - timedelta(minutes=settings.entry_closes_minutes_before_close),
+    )
+
+
+def require_entry_time(now: datetime, targets: Targets, settings: BookSettings) -> None:
+    """Refuse outside the entry window of the targets' own trading day."""
+    opens, closes = entry_window(targets, settings)
+    if not (opens <= now < closes):
+        local = now.astimezone(EXCHANGE_TZ)
+        raise AuctionBookError(
+            f"entry: {local:%A %H:%M:%S} New York is outside "
+            f"{opens.astimezone(EXCHANGE_TZ):%H:%M}-{closes.astimezone(EXCHANGE_TZ):%H:%M}"
+            f" on {targets.trade_date}"
+        )
 
 
 def require_window(now: datetime, window: Window, what: str) -> None:
