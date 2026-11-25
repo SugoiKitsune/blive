@@ -22,7 +22,6 @@ from blive.adapters.shared.credentials import (
     redaction_keys,
 )
 
-
 # --- Schema validation -------------------------------------------------------
 
 
@@ -141,9 +140,7 @@ def test_env_overrides_file(ig_schema: CredentialSchema, tmp_path: Path) -> None
     assert out["IG_USERNAME"] == "file-user", "file value used when env doesn't have key"
 
 
-def test_missing_required_raises_with_path(
-    ig_schema: CredentialSchema, tmp_path: Path
-) -> None:
+def test_missing_required_raises_with_path(ig_schema: CredentialSchema, tmp_path: Path) -> None:
     """All required fields missing → CredentialsMissing names the file path."""
     with pytest.raises(CredentialsMissing) as excinfo:
         load_credentials(ig_schema, secrets_dir=tmp_path, env={})
@@ -154,9 +151,7 @@ def test_missing_required_raises_with_path(
     assert "IG_OPTIONAL_NOTE" not in excinfo.value.missing
 
 
-def test_partial_missing_required_raises(
-    ig_schema: CredentialSchema, tmp_path: Path
-) -> None:
+def test_partial_missing_required_raises(ig_schema: CredentialSchema, tmp_path: Path) -> None:
     """Some required fields present, some missing → still raises with the missing ones."""
     env = {
         "IG_API_KEY": "key",
@@ -168,9 +163,7 @@ def test_partial_missing_required_raises(
     assert set(excinfo.value.missing) == {"IG_PASSWORD", "IG_ACCOUNT_ID", "IG_ENVIRONMENT"}
 
 
-def test_optional_field_in_env_is_returned(
-    ig_schema: CredentialSchema, tmp_path: Path
-) -> None:
+def test_optional_field_in_env_is_returned(ig_schema: CredentialSchema, tmp_path: Path) -> None:
     """When optional field IS provided, it appears in the result."""
     env = {
         "IG_API_KEY": "key",
@@ -232,9 +225,7 @@ def test_dotenv_parser_handles_comments_blanks_and_malformed_lines(
     assert out["IG_USERNAME"] == "user1"
 
 
-def test_dotenv_parser_strips_outer_whitespace(
-    ig_schema: CredentialSchema, tmp_path: Path
-) -> None:
+def test_dotenv_parser_strips_outer_whitespace(ig_schema: CredentialSchema, tmp_path: Path) -> None:
     env_path = tmp_path / "ig.env"
     env_path.write_text(
         "\n".join(

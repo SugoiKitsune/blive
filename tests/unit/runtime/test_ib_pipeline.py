@@ -70,6 +70,14 @@ class _FakeIBBroker:
         self.canceled_ids = []
         self._on_submit: Callable[[Order], list[OrderEvent]] = self._default_on_submit
         self._on_cancel: Callable[[ClientOrderId], list[OrderEvent]] = self._default_on_cancel
+        # M3.2: mirrors IBBroker.observed_error_codes. Tests mutate this
+        # (e.g. via a configure_submit closure) to simulate IB error/warning
+        # pushes such as 2161 (PMA cap); the pipeline baselines + deltas it.
+        self._error_codes: dict[int, int] = {}
+
+    @property
+    def observed_error_codes(self) -> dict[int, int]:
+        return dict(self._error_codes)
 
     def configure_submit(self, fn: Callable[[Order], list[OrderEvent]]) -> None:
         self._on_submit = fn
@@ -795,3 +803,146 @@ def test_run_ib_multi_pipeline_qql3_uses_converted_price_for_sizing_and_marks(
 
     # No RC-10 BLOCK on MKT orders; conversion handled at sizing time.
     assert all(b.check.value != "RC-10" for b in result.breaches)
+
+
+# --- M3.2 capture — per-symbol counts, FSM coverage, 2161 cap-binding -------
+
+
+def test_multi_pipeline_tracks_submitted_by_symbol_and_accepted_count(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """M3.2: submitted_by_symbol is the per-instrument placed denominator;
+    accepted_count counts orders that reached ACCEPTED. On the happy path
+    every submit reaches FILLED (through ACCEPTED), so accepted_count ==
+    submitted_count and the per-symbol placed counts sum to submitted_count."""
+    broker = _FakeIBBroker()
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    weights = _both_legs_eligible_weights([b.close_time_utc for b in bars])
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+        )
+    )
+
+    assert result.submitted_count > 0
+    assert sum(result.submitted_by_symbol.values()) == result.submitted_count
+    assert set(result.submitted_by_symbol).issubset({"TQQQ", "TMF", "IEF"})
+    # Happy path: every submit reaches ACCEPTED then FILLED.
+    assert result.accepted_count == result.submitted_count
+    # cap_binding is zero — no 2161 simulated on the default fake.
+    assert result.cap_binding_2161_count == 0
+    assert result.observed_error_codes == {}
+
+
+def test_multi_pipeline_records_2161_cap_binding_from_broker(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """M3.2 / OQ-031: a submit that emits SUBMITTED→ACCEPTED but never fills
+    (the cap binds) and pushes warning 2161 on the broker's error channel
+    is captured in observed_error_codes / cap_binding_2161_count via the
+    pipeline's baseline→delta snapshot."""
+    broker = _FakeIBBroker()
+
+    def _on_submit_cap_bound(order: Order) -> list[OrderEvent]:
+        # Simulate IB's errorEvent push for warning 2161 on this order.
+        broker._error_codes[2161] = broker._error_codes.get(2161, 0) + 1
+        cid = ClientOrderId(order.client_order_id)
+        now = order.created_at
+        return [
+            OrderEvent(
+                client_order_id=cid,
+                venue_order_id="42",
+                kind=OrderEventKind.SUBMITTED,
+                reason=None,
+                time_utc=now,
+            ),
+            OrderEvent(
+                client_order_id=cid,
+                venue_order_id="42",
+                kind=OrderEventKind.ACCEPTED,
+                reason=None,
+                time_utc=now,
+            ),
+            # No FILLED — the cap binds and the market moves away.
+        ]
+
+    broker.configure_submit(_on_submit_cap_bound)
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    times = [b.close_time_utc for b in bars]
+    # Only the first 3 rebalances to keep the timeout loop fast.
+    weights = _both_legs_eligible_weights(times[:3])
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+            event_wait_seconds=0.05,
+        )
+    )
+
+    # Every submit pushed a 2161; the pipeline captured the delta.
+    assert result.cap_binding_2161_count >= 1
+    assert result.observed_error_codes.get(2161) == result.cap_binding_2161_count
+    assert result.cap_binding_2161_count == result.submitted_count
+    # Reached ACCEPTED but never FILLED → engine-cancelled, zero fills.
+    assert result.accepted_count == result.submitted_count
+    assert result.fills_count == 0
+    assert result.canceled_count >= 1
+
+
+def test_multi_pipeline_no_accept_does_not_count_accepted(
+    triple_lev_market_data: PaperMarketData,
+    triple_lev_instruments: list[Instrument],
+) -> None:
+    """An order that times out in SUBMITTED (never ACCEPTED) must not
+    increment accepted_count — the FSM-trace coverage metric stays honest."""
+    broker = _FakeIBBroker()
+
+    def _on_submit_no_accept(order: Order) -> list[OrderEvent]:
+        cid = ClientOrderId(order.client_order_id)
+        return [
+            OrderEvent(
+                client_order_id=cid,
+                venue_order_id="42",
+                kind=OrderEventKind.SUBMITTED,
+                reason=None,
+                time_utc=order.created_at,
+            ),
+        ]
+
+    broker.configure_submit(_on_submit_no_accept)
+    live = _make_live_strategy(nav_slice=Decimal("0.05"))
+    bars = triple_lev_market_data.bars(triple_lev_instruments[0])
+    times = [b.close_time_utc for b in bars]
+    weights = _both_legs_eligible_weights(times[:3])
+
+    result = asyncio.run(
+        run_ib_multi_pipeline(
+            live_strategy=live,
+            broker=broker,  # type: ignore[arg-type]
+            market_data=triple_lev_market_data,
+            instruments=triple_lev_instruments,
+            target_weights_series=weights,
+            starting_cash=Decimal("100000"),
+            event_wait_seconds=0.05,
+        )
+    )
+
+    assert result.submitted_count >= 1
+    assert result.accepted_count == 0
+    assert result.fills_count == 0
+    assert result.canceled_count >= 1

@@ -50,7 +50,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, AsyncIterator
@@ -60,6 +61,12 @@ import ib_async
 
 from blive.adapters.ib.client import IBClient
 from blive.adapters.ib.instrument_resolver import IBInstrumentResolver
+from blive.adapters.ib.price_rules import (
+    IBPriceRuleService,
+    PriceIncrementProvider,
+    PriceRuleUnavailable,
+)
+from blive.adapters.shared.price_grid import RoundingPolicy, snap_price
 from blive.domain.events import AccountUpdate, ConnectionStatus, OrderEvent
 from blive.domain.ports import BrokerEvent, ClockPort
 from blive.domain.types import (
@@ -127,6 +134,7 @@ _TAG_TOTAL_CASH = "TotalCashBalance"
 _TAG_BUYING_POWER = "BuyingPower"
 _TAG_GROSS_POSITION = "GrossPositionValue"
 _TAG_MAINT_MARGIN = "MaintMarginReq"
+_TAG_EXCHANGE_RATE = "ExchangeRate"
 
 
 # Per-field thresholds for the AccountUpdate diff-suppress timer per
@@ -199,11 +207,22 @@ class IBBroker:
         resolver: IBInstrumentResolver,
         clock: ClockPort,
         account_update_interval_seconds: float = 30.0,
+        price_rules: PriceIncrementProvider | None = None,
+        rounding_policy: RoundingPolicy = RoundingPolicy.NEAREST,
     ) -> None:
         self._client = client
         self._resolver = resolver
         self._clock = clock
         self._account_update_interval_seconds = account_update_interval_seconds
+        # ADR-051: snap priced orders to the contract tick grid at submit
+        # time. Default-construct the IB source/cache from the shared client
+        # + resolver; tests inject a fake provider.
+        self._price_rules: PriceIncrementProvider = (
+            price_rules
+            if price_rules is not None
+            else IBPriceRuleService(client=client, resolver=resolver)
+        )
+        self._rounding_policy = rounding_policy
         self._connected = False
         self._events: asyncio.Queue[BrokerEvent] = asyncio.Queue()
         # Latest accumulated AccountValue tuples, keyed by (currency, tag).
@@ -233,6 +252,16 @@ class IBBroker:
         # rejection path (see :meth:`_on_order_status`); entries are popped
         # on terminal-event emission to bound memory.
         self._error_by_order_id: dict[int, tuple[int, str]] = {}
+        # Histogram of order-related IB error/warning codes observed on
+        # ``ib.errorEvent`` over this broker's lifetime, keyed by code. Read
+        # via the :attr:`observed_error_codes` snapshot. M3.2 reads this to
+        # count warning 2161 (PMA disruptive-orders price-cap — the OQ-031
+        # fill-rate signal) without log-scraping; the histogram also feeds
+        # M3.5's INV-14 catalogue-extension work. Counts every push with
+        # ``reqId > 0`` (order-related); connection-level events (reqId <= 0)
+        # are excluded symmetrically with the stash above. See INV-14 v0.9 /
+        # INV-8 ``cap_binding_2161_count``.
+        self._observed_error_codes: Counter[int] = Counter()
         # Cached handler reference for ``ib.errorEvent`` subscription —
         # symmetric with :attr:`_account_value_handler` so disconnect can
         # detach via ``-=``.
@@ -248,6 +277,20 @@ class IBBroker:
         the broker. Engine-side reconciliation (M5) translates between
         this broker-level view and per-strategy views."""
         return f"ib_{self._client.credentials.account_id}"
+
+    @property
+    def observed_error_codes(self) -> dict[int, int]:
+        """Snapshot of order-related IB error/warning codes seen so far,
+        keyed by code → occurrence count.
+
+        Populated by :meth:`_on_ib_error` for every ``ib.errorEvent`` push
+        with ``reqId > 0``. The pipeline reads this at end-of-run to record
+        warning 2161 (PMA price-cap) occurrences in
+        :class:`blive.runtime.ib_pipeline.IBMultiRunResult` — the M3.2 /
+        OQ-031 cap-binding signal. Returns a copy; mutating it does not
+        affect the broker's internal counter.
+        """
+        return dict(self._observed_error_codes)
 
     # --- BrokerPort: connect / disconnect -----------------------------------
 
@@ -479,6 +522,24 @@ class IBBroker:
                 f"error since the FSM is in SUBMITTED+ already."
             )
 
+        # ADR-051: render the order's priced fields onto the contract's
+        # legal tick grid before it reaches the wire. A grid we can't
+        # determine is a blive-side REJECT (don't ship a price IB would
+        # bounce with error 110); the order never reaches placeOrder.
+        try:
+            order = await self._snap_order_prices(order)
+        except PriceRuleUnavailable as exc:
+            await self._events.put(
+                OrderEvent(
+                    client_order_id=client_order_id,
+                    venue_order_id=None,
+                    kind=OrderEventKind.REJECTED,
+                    reason=f"blive:price-rule-unavailable {exc}",
+                    time_utc=self._clock.now(),
+                )
+            )
+            return client_order_id
+
         contract = self._resolver.to_contract(order.instrument)
         ib_order = _blive_to_ib_order(order)
         # Stamp the client_order_id into the IB orderRef so reconciliation
@@ -565,6 +626,44 @@ class IBBroker:
             "strategy doesn't modify in-flight orders; cancel-then-new "
             "wrapper deferred until a strategy needs it."
         )
+
+    # --- Internals: price-grid conformance (ADR-051) ------------------------
+
+    async def _snap_order_prices(self, order: Order) -> Order:
+        """Snap an order's priced fields to the contract tick grid (ADR-051).
+
+        MKT / ADAPTIVE_MKT orders (no price) pass through untouched. For
+        priced orders, fetch the contract's increment table (cached) and
+        snap ``limit_price`` / ``stop_price`` per the broker's
+        :class:`RoundingPolicy`. Returns ``order`` unchanged when nothing
+        moved; propagates :class:`PriceRuleUnavailable` from the provider
+        when the grid can't be determined — :meth:`submit` turns that into
+        a REJECT.
+        """
+        if order.limit_price is None and order.stop_price is None:
+            return order
+        increments = await self._price_rules.increments_for(order.instrument)
+        new_limit = (
+            snap_price(order.limit_price, increments, side=order.side, policy=self._rounding_policy)
+            if order.limit_price is not None
+            else None
+        )
+        new_stop = (
+            snap_price(order.stop_price, increments, side=order.side, policy=self._rounding_policy)
+            if order.stop_price is not None
+            else None
+        )
+        if new_limit == order.limit_price and new_stop == order.stop_price:
+            return order
+        log.info(
+            "IBBroker snapped %s prices to tick grid (ADR-051): " "limit %s -> %s, stop %s -> %s",
+            order.instrument.symbol,
+            order.limit_price,
+            new_limit,
+            order.stop_price,
+            new_stop,
+        )
+        return replace(order, limit_price=new_limit, stop_price=new_stop)
 
     # --- Internals: per-trade order-event handlers --------------------------
 
@@ -903,6 +1002,7 @@ class IBBroker:
         """
         if reqId <= 0:
             return
+        self._observed_error_codes[int(errorCode)] += 1
         self._error_by_order_id[int(reqId)] = (int(errorCode), errorString or "")
 
     async def _emit_rejected_via_inactive(
@@ -1118,21 +1218,31 @@ class IBBroker:
         # currency, or via per-currency rows.
         base_currency = self._infer_base_currency()
 
+        # Aggregate fields read the explicit "BASE" pseudo-currency row (the
+        # consolidated total across currencies, already in base-currency units)
+        # PRIMARY, falling back to the base-currency sleeve. In a mixed-currency
+        # account ``NetLiquidationByCurrency`` carries BOTH a per-currency sleeve
+        # (e.g. GBP = the GBP-denominated holdings) AND a "BASE" aggregate (the
+        # whole account); reading the sleeve understates equity by the non-base
+        # sleeves — the M3.4 finding (2026-06-05: GBP sleeve £902,839 vs BASE
+        # total £1,003,886, the ~£101k USD cash dropped). The base-only tags
+        # (BuyingPower / GrossPositionValue / MaintMarginReq) have no "BASE" row,
+        # so they correctly fall through to the base-currency sleeve.
         equity = self._account_value_decimal(
-            (base_currency, _TAG_NET_LIQUIDATION),
-            fallback_keys=[("BASE", _TAG_NET_LIQUIDATION)],
+            ("BASE", _TAG_NET_LIQUIDATION),
+            fallback_keys=[(base_currency, _TAG_NET_LIQUIDATION)],
         )
         buying_power = self._account_value_decimal(
-            (base_currency, _TAG_BUYING_POWER),
-            fallback_keys=[("BASE", _TAG_BUYING_POWER)],
+            ("BASE", _TAG_BUYING_POWER),
+            fallback_keys=[(base_currency, _TAG_BUYING_POWER)],
         )
         gross_exposure = self._account_value_decimal(
-            (base_currency, _TAG_GROSS_POSITION),
-            fallback_keys=[("BASE", _TAG_GROSS_POSITION)],
+            ("BASE", _TAG_GROSS_POSITION),
+            fallback_keys=[(base_currency, _TAG_GROSS_POSITION)],
         )
         margin_used = self._account_value_decimal(
-            (base_currency, _TAG_MAINT_MARGIN),
-            fallback_keys=[("BASE", _TAG_MAINT_MARGIN)],
+            ("BASE", _TAG_MAINT_MARGIN),
+            fallback_keys=[(base_currency, _TAG_MAINT_MARGIN)],
         )
 
         # cash_by_ccy: per-currency TotalCashBalance rows (excludes the
@@ -1184,9 +1294,23 @@ class IBBroker:
             if tag == "AccountCurrency" and value:
                 return value
 
-        # 2. The non-BASE currency with a NetLiquidation row. For a
-        # single-currency account there's only one; for multi-currency the
-        # account base is ambiguous and we pick the highest-equity row.
+        # 2. The non-"BASE" currency whose ExchangeRate is exactly 1.0 — IB
+        # reports a unit rate only for the account's base currency, so this is
+        # an authoritative signal (unlike step 3's raw-magnitude heuristic,
+        # which compares unconverted cross-currency NetLiq values and is right
+        # only when the base sleeve happens to be the largest). M3.4 hardening.
+        for (ccy, tag), value in self._account_values.items():
+            if tag != _TAG_EXCHANGE_RATE or not ccy or ccy == "BASE":
+                continue
+            try:
+                if Decimal(value) == Decimal("1"):
+                    return ccy
+            except (ValueError, ArithmeticError):
+                continue
+
+        # 3. The non-BASE currency with the largest NetLiquidation row. For a
+        # single-currency account there's only one; for multi-currency without
+        # an ExchangeRate signal this is a best-effort heuristic.
         best_ccy = ""
         best_equity = Decimal("-Infinity")
         for (ccy, tag), value in self._account_values.items():
@@ -1204,7 +1328,7 @@ class IBBroker:
         if best_ccy:
             return best_ccy
 
-        # 3. Fallback: USD (most common IB account currency).
+        # 4. Fallback: USD (most common IB account currency).
         return "USD"
 
     def _account_value_decimal(
@@ -1292,10 +1416,10 @@ def _blive_to_ib_order(order: Order) -> ib_async.Order:
     Supports ``MKT``, ``LMT``, ``STP``, ``STP_LMT`` (M2-IB.4a) and
     ``ADAPTIVE_MKT`` (M2-IB.6.2c — IBALGO Adaptive variant of MKT that
     bypasses IB's regulatory disruptive-orders price-cap on volatile /
-    leveraged products; see warning 2161 in INV-14 v0.7). ``MOC`` /
-    ``LOC`` / ``OPG`` are valid blive types per [DD-1 §1.1](../../../../docs/dd/domain_objects.md#11-enums)
-    but raise here pending v1.1 — they require additional IB plumbing
-    (``goodAfterTime``, ``tif="OPG"``, etc.).
+    leveraged products; see warning 2161 in INV-14 v0.7), and ``MOC``
+    (closing auction). A ``MKT`` order with ``TimeInForce.OPG`` is the
+    opening-auction order. ``LOC`` is a valid blive type per [DD-1 §1.1](../../../../docs/dd/domain_objects.md#11-enums)
+    but raises here: it needs a limit price that ``Order`` does not allow it.
     """
     action = order.side.value  # OrderSide.BUY → "BUY"; OrderSide.SELL → "SELL"
     qty = float(order.quantity)
@@ -1347,11 +1471,18 @@ def _blive_to_ib_order(order: Order) -> ib_async.Order:
             lmtPrice=float(order.limit_price),
             stopPrice=float(order.stop_price),
         )
+    elif order.order_type == OrderType.MOC:
+        # Market-on-close: joins the listing exchange's closing auction and
+        # fills at the official close. IB takes it as ``orderType="MOC"`` with
+        # a DAY time-in-force. The opening-auction counterpart needs no branch
+        # of its own: a ``MKT`` order with ``TimeInForce.OPG`` is IB's
+        # market-on-open, and the tif is copied through below.
+        ib_order = ib_async.Order(action=action, totalQuantity=qty, orderType="MOC")
     else:
         raise NotImplementedError(
-            f"IBBroker.submit does not support order_type={order.order_type.value} "
-            f"at M2-IB.6.2c. Supported: MKT, ADAPTIVE_MKT, LMT, STP, STP_LMT. "
-            f"MOC/LOC/OPG land at v1.1 if a strategy needs them."
+            f"IBBroker.submit does not support order_type={order.order_type.value}. "
+            f"Supported: MKT, ADAPTIVE_MKT, LMT, STP, STP_LMT, MOC. "
+            f"LOC needs a limit price the Order type does not yet allow for it."
         )
 
     ib_order.tif = tif

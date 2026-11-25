@@ -7,7 +7,7 @@ name = "blive"
 version = "0.1.0"
 description = "Live algorithmic execution engine — sibling to btest"
 readme = "README.md"
-requires-python = "==3.11.*"
+requires-python = ">=3.11"
 authors = [{ name = "Oleg Roshka" }]
 
 # Runtime dependencies.
@@ -26,7 +26,9 @@ dependencies = [
   # YAML loader for blive's per-strategy live config.
   "pyyaml>=6.0",
   # Parquet reader for the M1 PaperMarketData fixture (ADR-029).
-  "pandas>=2.0",
+  # Pinned < 3 at the 3.12 upgrade (ADR-053): pandas 3.0 is a breaking major
+  # (Copy-on-Write default, etc.); the upgrade isolates the interpreter change.
+  "pandas>=2.0,<3.0",
   "pyarrow>=15.0",
   "lightstreamer-client-lib>=2.2.2",
 ]
@@ -37,9 +39,13 @@ dev = [
   "pytest-asyncio>=0.24",
   "pytest-mock>=3.12",
   "hypothesis>=6.100",
-  "mypy>=1.10",
-  "black>=24.0",
-  "isort>=5.13",
+  "mypy==2.1.0",  # pinned like the formatters (its error output is the type gate); 2.x at the 3.12 upgrade per ADR-053
+  # Formatters pinned exactly: their output is the gate, so it must be
+  # deterministic across environments/time. (A floor let the env drift to a
+  # newer black whose blank-line rule reformatted M2-IG-era files — caught at
+  # M3.3. Bump deliberately: change the pin, then re-run black/isort.)
+  "black==26.3.1",
+  "isort==8.0.1",
   "import-linter>=2.0",
   "types-pyyaml>=6.0",
   "pandas-stubs>=2.0",
@@ -75,14 +81,14 @@ markers = [
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.isort]
 profile = "black"
 line_length = 100
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true

@@ -29,10 +29,9 @@ from decimal import Decimal
 from typing import Any, AsyncIterator, Mapping
 from uuid import UUID, uuid4
 
-from blive.adapters.ig.client import IGClient
+from blive.adapters.ig.client import IGClient, IGRequestInvalid
 from blive.adapters.ig.credentials import IGCredentials
 from blive.adapters.ig.instrument_resolver import IGInstrumentResolver
-from blive.adapters.ig.client import IGRequestInvalid
 from blive.domain.events import ConnectionStatus, OrderEvent
 from blive.domain.ports import BrokerEvent, ClockPort
 from blive.domain.types import (
@@ -288,18 +287,14 @@ class IGBroker:
         # Step 1: POST the order. IG returns dealReference; HTTP errors map
         # to the IGClient's typed-exception hierarchy (IGOrderRejected for
         # error.confirms.deal-rejected).
-        response = await self._client.post(
-            "/positions/otc", version=2, json=body, bucket="trading"
-        )
+        response = await self._client.post("/positions/otc", version=2, json=body, bucket="trading")
         if not isinstance(response, dict):
             raise _IGShapeError(
                 f"IG /positions/otc returned non-dict body: {type(response).__name__}"
             )
         deal_reference = response.get("dealReference")
         if not isinstance(deal_reference, str) or not deal_reference:
-            raise _IGShapeError(
-                f"IG /positions/otc response missing dealReference: {response!r}"
-            )
+            raise _IGShapeError(f"IG /positions/otc response missing dealReference: {response!r}")
 
         # Track for later cancel/reconciliation. The deal_reference -> blive
         # client_order_id mapping is what reconciliation (M5) uses to
@@ -410,11 +405,7 @@ class IGBroker:
         now = self._clock.now()
 
         if deal_status == "REJECTED":
-            reason = str(
-                confirm.get("reason")
-                or confirm.get("reasonCode")
-                or "REJECTED_NO_REASON"
-            )
+            reason = str(confirm.get("reason") or confirm.get("reasonCode") or "REJECTED_NO_REASON")
             await self._events.put(
                 OrderEvent(
                     client_order_id=order.client_order_id,
@@ -672,9 +663,11 @@ def _parse_working_order(
     instrument = Instrument(
         symbol=_epic_to_symbol(epic),
         venue="IG",
-        currency=str(market_obj.get("currencies", [{}])[0].get("code", "EUR"))
-        if isinstance(market_obj.get("currencies"), list) and market_obj.get("currencies")
-        else "EUR",
+        currency=(
+            str(market_obj.get("currencies", [{}])[0].get("code", "EUR"))
+            if isinstance(market_obj.get("currencies"), list) and market_obj.get("currencies")
+            else "EUR"
+        ),
         asset_class=_epic_to_asset_class(epic),
         tradability="cfd",
     )

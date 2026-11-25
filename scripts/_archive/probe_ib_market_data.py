@@ -129,7 +129,9 @@ async def _run_probe() -> int:
             f"V={last.volume} VWAP={last.vwap}"
         )
     else:
-        print("    (no bars returned -- subscription tier may be missing for delayed historical data?)")
+        print(
+            "    (no bars returned -- subscription tier may be missing for delayed historical data?)"
+        )
 
     metrics = rate_limiter.metrics()
     historical_metrics = metrics["historical"]

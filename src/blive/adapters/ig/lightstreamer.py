@@ -39,7 +39,6 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Mapping, Protocol, runtime_checkable
 
-
 # --- Public types -----------------------------------------------------------
 
 
@@ -93,9 +92,7 @@ class _FakeSubscription:
     item: str
     fields: tuple[str, ...]
     mode: str
-    _queue: asyncio.Queue[Mapping[str, str | None] | None] = field(
-        default_factory=asyncio.Queue
-    )
+    _queue: asyncio.Queue[Mapping[str, str | None] | None] = field(default_factory=asyncio.Queue)
     _closed: bool = False
 
     def push(self, update: Mapping[str, str | None]) -> None:

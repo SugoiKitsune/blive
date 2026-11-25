@@ -247,9 +247,7 @@ class IGMarketData:
         if start.tzinfo is None or end.tzinfo is None:
             raise ValueError("IGMarketData.historical_bars requires UTC-aware start / end")
         if start >= end:
-            raise ValueError(
-                f"IGMarketData.historical_bars: start ({start}) must be < end ({end})"
-            )
+            raise ValueError(f"IGMarketData.historical_bars: start ({start}) must be < end ({end})")
 
         epic = await self._resolver.resolve(instrument)
         resolution = _freq_to_ig_resolution(freq)
@@ -271,9 +269,7 @@ class IGMarketData:
             if not isinstance(entry, dict):
                 continue
             try:
-                bar = _parse_price_bar(
-                    entry, instrument=instrument, bar_duration=bar_duration
-                )
+                bar = _parse_price_bar(entry, instrument=instrument, bar_duration=bar_duration)
             except (KeyError, ValueError, TypeError) as exc:
                 log.warning("IG /prices entry skipped (parse failure): %s", exc)
                 continue

@@ -67,6 +67,18 @@ Usage::
     uv run python scripts/run_m2ib6_ib_paper.py --order-type LMT --max-bars 30
     uv run python scripts/run_m2ib6_ib_paper.py --max-bars 0  # full replay
 
+M3.2 bounded deterministic capture (per [TASK_REGISTRY M3.2](../TASK_REGISTRY.md)):
+the milestone closes on a small, definite set of capture rows rather than 10
+calendar days. Regime variety comes from the **replay window** (the signal is
+historical), not the calendar, so it is deterministic. Workflow::
+
+    # 1. offline: size --max-bars to span >= 1 equity-leg regime flip (no IB)
+    ... run_m2ib6_ib_paper.py --max-bars 250 --dry-run
+    # 2. during LSE RTH: capture the run (one row appended to runs.jsonl)
+    ... run_m2ib6_ib_paper.py --order-type LMT --max-bars 250
+    # ... annotate a regime-flat datapoint:
+    ... run_m2ib6_ib_paper.py --max-bars 5 --note "regime-flat"
+
 Exit codes:
 
     0  success — pipeline ran to completion (regardless of fill counts)
@@ -82,8 +94,10 @@ import asyncio
 import logging
 import sys
 import traceback
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -101,7 +115,12 @@ from blive.adapters.shared.credentials import CredentialsMissing
 from blive.adapters.shared.rate_limiter import TokenBucketRateLimiter
 from blive.domain.types import AssetClass, Instrument, OrderType
 from blive.runtime.ib_pipeline import IBMultiRunResult, run_ib_multi_pipeline
-from blive.runtime.signals import eligibility_to_target_weights
+from blive.runtime.m3_2_record import (
+    append_run_record,
+    build_run_record,
+    default_window_path,
+)
+from blive.runtime.signals import eligibility_to_target_weights, equity_leg_regime_flips
 from blive.strategy.config import (
     ArtefactPaths,
     LiveOverrides,
@@ -293,6 +312,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default="triple_lev_sma_filter_dsl",
         help="Strategy id for the run record. Default matches the canonical id.",
     )
+    parser.add_argument(
+        "--record-path",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the M3.2 window results JSONL. One row is appended per run. "
+            "Default: ~/.blive/data/m3_2_window/runs.jsonl"
+        ),
+    )
+    parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="Skip writing the M3.2 results row (e.g. for a throwaway smoke run).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Offline regime-coverage preview: load the signals, compute the "
+            "equity-leg regime-flip count for the chosen --max-bars window, print "
+            "it, and exit — no IB connection, no results row. Use it to pick a "
+            "--max-bars window that spans >= 1 regime flip for the M3.2 bounded "
+            "deterministic capture (regime variety comes from the replay window, "
+            "not the calendar)."
+        ),
+    )
+    parser.add_argument(
+        "--note",
+        default="",
+        help=(
+            "Free-text note stored on the M3.2 results row (e.g. "
+            "'regime-flat window' to annotate the OQ-031 evidence per G4 Q2)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -323,34 +376,8 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"  order type:     {args.order_type}")
     print(f"  max bars:       {'no cap' if args.max_bars == 0 else args.max_bars}")
 
-    # Load IB credentials.
-    try:
-        credentials = IBCredentials.load()
-    except CredentialsMissing as exc:
-        print(f"\nFAILED: {exc}")
-        return 2
-    except ValueError as exc:
-        print(f"\nFAILED: invalid credentials -- {exc}")
-        return 2
-    print(
-        f"  IB:             host={credentials.host} port={credentials.port} "
-        f"client_id={credentials.client_id} account=[REDACTED]"
-    )
-
-    # Construct broker stack.
-    clock = WallClock()
-    rate_limiter = TokenBucketRateLimiter(config=IB_DEFAULT_RATE_LIMITS, clock=clock)
-    client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock)
-    resolver = IBInstrumentResolver(client)
-    broker = IBBroker(client=client, resolver=resolver, clock=clock)
-
-    _print_header("Connecting to IB Paper")
-    try:
-        await broker.connect()
-    except IBConnectionError as exc:
-        print(f"\nFAILED on connect: {exc}")
-        return 3
-    print(f"  is_connected={broker.is_connected}")
+    # --- Load market data + compute target weights (no IB connection yet) ---
+    # Done before connecting so --dry-run can preview regime coverage offline.
 
     # Build PaperMarketData with the 3 tradable parquets.
     fixtures = {inst: eodhd_dir / f"{inst.symbol}_1d.parquet" for inst in _TRADABLES}
@@ -364,7 +391,6 @@ async def _run(args: argparse.Namespace) -> int:
     eligibility_df = pd.read_parquet(signals_path)
     if eligibility_df.empty:
         print(f"\nFAILED: signals parquet at {signals_path} is empty.")
-        await broker.disconnect()
         return 5
     # Defensive: older eligibility parquets may have a tz-naive index
     # (built from .values in earlier refresh script versions). Force
@@ -397,8 +423,58 @@ async def _run(args: argparse.Namespace) -> int:
             "Check that eligibility parquet covers the same date range as the "
             "EODHD ticker parquets."
         )
-        await broker.disconnect()
         return 5
+
+    # Regime coverage of the replay window — deterministic, from the signal.
+    # The M3.2 "bounded deterministic capture" close-criterion: pick a
+    # --max-bars window that spans >= 1 equity-leg regime flip (regime variety
+    # comes from the replay window, not from waiting for live calendar flips).
+    regime_flips = equity_leg_regime_flips(target_weights_capped, equity_leg=_QQL3.symbol)
+    print(f"  regime-flip count (QQL3 equity leg): {regime_flips}")
+
+    # --dry-run: report regime coverage and exit — no IB, no results row — so
+    # the operator can size --max-bars to span a flip before the RTH run.
+    if args.dry_run:
+        _print_header("Dry run — regime coverage preview (no IB, no record)")
+        _print_step("rebalance rows", str(len(target_weights_capped)))
+        _print_step("regime-flip count (QQL3)", str(regime_flips))
+        if regime_flips == 0:
+            _print_step(
+                "NOTE",
+                "window is regime-FLAT — widen --max-bars to span a QQQ/TLT "
+                "SMA-200 flip for the M3.2 regime-variety criterion (or capture "
+                "it as a flat datapoint with --note 'regime-flat').",
+            )
+        return 0
+
+    # Load IB credentials.
+    try:
+        credentials = IBCredentials.load()
+    except CredentialsMissing as exc:
+        print(f"\nFAILED: {exc}")
+        return 2
+    except ValueError as exc:
+        print(f"\nFAILED: invalid credentials -- {exc}")
+        return 2
+    print(
+        f"  IB:             host={credentials.host} port={credentials.port} "
+        f"client_id={credentials.client_id} account=[REDACTED]"
+    )
+
+    # Construct broker stack.
+    clock = WallClock()
+    rate_limiter = TokenBucketRateLimiter(config=IB_DEFAULT_RATE_LIMITS, clock=clock)
+    client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock)
+    resolver = IBInstrumentResolver(client)
+    broker = IBBroker(client=client, resolver=resolver, clock=clock)
+
+    _print_header("Connecting to IB Paper")
+    try:
+        await broker.connect()
+    except IBConnectionError as exc:
+        print(f"\nFAILED on connect: {exc}")
+        return 3
+    print(f"  is_connected={broker.is_connected}")
 
     # If --max-bars trimmed the canonical bar set, we need a market_data view
     # restricted to those bars too — write a small temp parquet per ticker with
@@ -475,6 +551,35 @@ async def _run(args: argparse.Namespace) -> int:
         return 5
 
     _print_summary(result, starting_cash=args.starting_cash)
+
+    # M3.2: append one structured results row for the empirical window (per
+    # TASK_REGISTRY M3.2). Source: IBMultiRunResult counters +
+    # observed_error_codes (warning 2161 = cap-binding signal, OQ-031) + the
+    # equity-leg regime-flip count from the capped target weights. Written
+    # before disconnect so a disconnect hiccup never loses the row.
+    if not args.no_record:
+        record_path = args.record_path if args.record_path is not None else default_window_path()
+        # regime_flips was computed pre-connect (same value drives --dry-run).
+        record = build_run_record(
+            result=result,
+            regime_flip_count=regime_flips,
+            rebalance_rows=len(target_weights_capped),
+            strategy_id=args.strategy_id,
+            instruments=[i.symbol for i in _TRADABLES],
+            order_type=args.order_type,
+            max_bars=args.max_bars,
+            nav_slice=args.nav_slice,
+            starting_cash=args.starting_cash,
+            run_id=uuid4().hex,
+            recorded_at_utc=datetime.now(timezone.utc).isoformat(),
+            note=args.note,
+        )
+        written = append_run_record(record_path, record)
+        _print_header("M3.2 results row")
+        _print_step("regime-flip count", str(regime_flips))
+        _print_step("cap-binding (2161)", str(record.cap_binding_2161_count))
+        _print_step("fill-rate by symbol", str(record.fill_rate_by_symbol))
+        _print_step("appended to", str(written))
 
     _print_header("Disconnecting")
     await broker.disconnect()

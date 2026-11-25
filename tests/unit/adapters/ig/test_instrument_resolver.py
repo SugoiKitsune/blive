@@ -33,7 +33,6 @@ from blive.adapters.shared.rate_limiter import (
 )
 from blive.domain.types import AssetClass, Instrument
 
-
 # --- Fixtures ---------------------------------------------------------------
 
 
@@ -318,12 +317,12 @@ async def test_resolve_falls_back_to_search_on_unknown_instrument() -> None:
     assert epic == "IX.D.WEIRDSYM.DAILY.IP"
     # First try should have been the cash-suffix guess; then a /markets
     # search; then the metadata fetch on the resolved DAILY epic.
-    assert any("/markets/IX.D.WEIRDSYM.CASH.IP" in r for r in requests_seen), (
-        f"first try should have been the cash-suffix guess: {requests_seen}"
-    )
-    assert any("/markets/IX.D.WEIRDSYM.DAILY.IP" in r for r in requests_seen), (
-        f"resolved DAILY epic should have triggered a metadata fetch: {requests_seen}"
-    )
+    assert any(
+        "/markets/IX.D.WEIRDSYM.CASH.IP" in r for r in requests_seen
+    ), f"first try should have been the cash-suffix guess: {requests_seen}"
+    assert any(
+        "/markets/IX.D.WEIRDSYM.DAILY.IP" in r for r in requests_seen
+    ), f"resolved DAILY epic should have triggered a metadata fetch: {requests_seen}"
 
 
 async def test_search_with_zero_candidates_raises_not_resolvable() -> None:

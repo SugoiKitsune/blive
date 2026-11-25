@@ -23,7 +23,6 @@ from blive.adapters.shared.rate_limiter import (
     UnknownBucket,
 )
 
-
 # --- Validation invariants ---------------------------------------------------
 
 

@@ -256,8 +256,39 @@ def eligibility_to_target_weights(eligibility: pd.DataFrame) -> pd.DataFrame:
     return weights
 
 
+def equity_leg_regime_flips(target_weights: pd.DataFrame, *, equity_leg: str) -> int:
+    """Count regime flips of the equity leg across a target-weights frame.
+
+    A *regime flip* is a transition in the sign-state of the equity leg's
+    weight between consecutive rows — long (``> 0``) ↔ flat (``== 0``) ↔
+    short (``< 0``). For the Phase 1 A3 strategy the equity leg (``QQL3``)
+    is long / flat, so a flip counts each entry into or exit from the
+    leveraged-equity position. This is the M3.2 "regime-flip count"
+    metric (per [TASK_REGISTRY M3.2](../../../TASK_REGISTRY.md)) that
+    contextualises the OQ-031 fill-rate evidence — a regime-flat window
+    annotates the OQ-031 decision rather than waiting unbounded
+    (TASK_REGISTRY G4 exit-criterion #3 / Q2 quality check).
+
+    Returns ``0`` for an empty frame, a single-row frame, or an
+    ``equity_leg`` column absent from ``target_weights`` (no observable
+    equity-leg regime). Rows are taken in their existing order; the caller
+    passes a time-ordered frame (the M3.2 driver passes the capped,
+    bar-aligned ``target_weights``).
+    """
+    if equity_leg not in target_weights.columns:
+        return 0
+    col = target_weights[equity_leg].fillna(0.0)
+    if len(col) < 2:
+        return 0
+    # Sign-state per row: +1 long / 0 flat / -1 short. Count transitions
+    # between consecutive distinct states.
+    states = np.sign(col.to_numpy(dtype=float)).astype(int)
+    return int((states[1:] != states[:-1]).sum())
+
+
 __all__ = [
     "sma_crossover_position",
     "triple_lev_sma_eligibility",
     "eligibility_to_target_weights",
+    "equity_leg_regime_flips",
 ]

@@ -24,7 +24,6 @@ from blive.adapters.ig.lightstreamer import (
     LightstreamerSubscription,
 )
 
-
 # --- Protocol conformance ---------------------------------------------------
 
 

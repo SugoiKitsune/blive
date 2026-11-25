@@ -1,10 +1,10 @@
 ---
 id: KB-3
 title: IB Pacing & Limits Spec
-status: DRAFT
+status: STABLE
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.1.1
+last_reviewed: 2026-06-05
+version: 1.0
 sources:
   - https://interactivebrokers.github.io/tws-api/order_limitations.html      # accessed 2026-04-26
   - https://interactivebrokers.github.io/tws-api/historical_limitations.html # accessed 2026-04-26
@@ -18,7 +18,7 @@ depends_on:
 referenced_by:
   - REQUIREMENTS.md §10 (12 IB gotchas), §5.2, §5.5
   - ADR-008 (RiskEngine rate-limit defaults)
-  - INV-14 ib_error_codes (MISSING — derived in part)
+  - INV-14 ib_error_codes (DRAFT v0.10 — derived in part)
 ---
 
 # KB-3 — IB Pacing & Limits Spec
@@ -120,6 +120,8 @@ Reference: [Placing Orders](https://interactivebrokers.github.io/tws-api/order_s
 - Engine pauses submission across the daily restart window; runs full reconciliation on reconnect.
 - Weekly token: alert-only if Sunday window slips.
 
+**Phase 1 reality (per [ADR-040](../decisions/DECISIONS.md#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway)):** native Windows IB Gateway with operator-managed manual relogin (no Docker / IBC — that's M8). The M3.5 disconnect/reconnect drill ([KB-7 FM-1](failure_modes.md)) found blive has **no native auto-reconnect** yet: `IBBroker.is_connected` goes stale on an unexpected drop, recovery is a manual `disconnect()+connect()`, and a Gateway restart surfaces IB **10141** (paper-trading disclaimer) + a `clientId`-in-use transient. Continuous reconciliation + auto-reconnect (the "pauses submission / runs full reconciliation" behaviour above) are **M5** ([REQUIREMENTS §5.7](../../REQUIREMENTS.md#57-reconciliation)), not yet implemented at Phase 1.
+
 Reference: [Auto-restart considerations](https://www.ibkrguides.com/traderworkstation/auto-restart-considerations.htm), [IBC](https://github.com/IbcAlpha/IBC), [gnzsnz/ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker).
 
 ---
@@ -149,7 +151,7 @@ If anyone considers CPAPI:
 
 ## 8. Error Codes at the Pacing Boundary
 
-Selected codes the adapter must handle explicitly (full list in [INV-14 ib_error_codes](../inv/ib_error_codes.md), MISSING):
+Selected codes the adapter must handle explicitly (full list of *observed-and-handled* codes in [INV-14 ib_error_codes](../inv/ib_error_codes.md), DRAFT v0.10):
 
 | Code | Meaning | Adapter action |
 |------|---------|----------------|
@@ -191,9 +193,10 @@ Concrete numbers the IBBroker adapter ships with (overridable):
 - [REQUIREMENTS §10](../../REQUIREMENTS.md) — 12 gotchas + mitigations.
 - [REQUIREMENTS §5.2, §5.5, §12](../../REQUIREMENTS.md) — market data, risk thresholds, ops model.
 - [ADR-002](../decisions/DECISIONS.md#adr-002--adopt-ib_async-v21-as-wire-level-ib-driver), [ADR-017](../decisions/DECISIONS.md#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing).
-- [INV-14 ib_error_codes](../inv/ib_error_codes.md) (MISSING) — full error-code catalogue.
+- [INV-14 ib_error_codes](../inv/ib_error_codes.md) (DRAFT v0.10) — the observed-and-handled error-code catalogue.
 
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap from IB docs.
 - **v0.1.1 (2026-04-27)** — M2-entry review pass. No amendments needed; the §1 (50 msg/sec), §2 (≤ 60/10min historical, BID_ASK ×2), §3 (market data tiers + reqMktData/reqTickByTickData budgets), §4 (orderId monotonic), §5 (daily/weekly events), §8 (error codes) tables are unchanged from IB sources at session date. The DRAFT → STABLE flip is deferred to M2 close once the [ADR-031](../decisions/DECISIONS.md#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) rate limiter has been exercised against IB Paper (the §9 default budgets become "verified by behaviour" rather than "verified by docs only").
+- **v1.0 (2026-06-05 / M3.6) — DRAFT → STABLE.** The [ADR-031](../decisions/DECISIONS.md#adr-031--token-bucket-rate-limiter-shape-for-ib-adapters) rate limiter has been exercised against IB Paper across every M2-IB / M3 probe + capture run (e.g. `rate_limiter.global` consumed + refilled correctly on the read-side probe), so §9's default budgets are now behaviour-verified, not docs-only. Stale INV-14 refs fixed (now DRAFT v0.10); §5 daily-restart behaviour cross-linked to the M3.5 reconnect drill ([KB-7 FM-1](failure_modes.md)) + ADR-040 (Phase 1 native Windows Gateway; auto-reconnect / continuous reconciliation are M5). **Scope of STABLE: the Phase-1 pacing surface.** Phase-2 futures / paid-market-data-tier work may re-exercise §2 / §3 and flip this back to STALE.

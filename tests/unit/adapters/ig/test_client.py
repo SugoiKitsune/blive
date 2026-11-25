@@ -34,7 +34,6 @@ from blive.adapters.shared.rate_limiter import (
     TokenBucketRateLimiter,
 )
 
-
 # --- Fixtures ---------------------------------------------------------------
 
 
@@ -52,9 +51,7 @@ def rate_limiter(clock: SimClock) -> TokenBucketRateLimiter:
             buckets={
                 "general": RateLimitBucket(capacity=100, refill_per_second=Decimal("10")),
                 "trading": RateLimitBucket(capacity=100, refill_per_second=Decimal("10")),
-                "historical_prices": RateLimitBucket(
-                    capacity=100, refill_per_second=Decimal("10")
-                ),
+                "historical_prices": RateLimitBucket(capacity=100, refill_per_second=Decimal("10")),
             }
         ),
     )
@@ -533,5 +530,6 @@ def test_classify_error_table() -> None:
     assert _classify_error(None, 500) is IGRequestInvalid.__bases__[0] or True  # see below
     # 5xx without errorCode → IGConnectionError per the implementation.
     from blive.adapters.ig.client import IGConnectionError
+
     assert _classify_error(None, 500) is IGConnectionError
     assert _classify_error(None, 502) is IGConnectionError

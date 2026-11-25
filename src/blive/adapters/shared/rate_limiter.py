@@ -34,7 +34,6 @@ from typing import Mapping
 
 from blive.domain.ports import ClockPort
 
-
 # --- Public dataclasses ------------------------------------------------------
 
 

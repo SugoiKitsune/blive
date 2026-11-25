@@ -11,6 +11,7 @@ import pytest
 from blive.domain.types import AssetClass, Bar, Instrument
 from blive.runtime.signals import (
     eligibility_to_target_weights,
+    equity_leg_regime_flips,
     sma_crossover_position,
     triple_lev_sma_eligibility,
 )
@@ -325,3 +326,52 @@ def test_triple_lev_eligibility_output_columns_in_canonical_order() -> None:
     assert set(df["TQQQ"].unique()) <= {0.0, 1.0}
     assert set(df["TMF"].unique()) <= {0.0, 1.0}
     assert set(df["IEF"].unique()) <= {0.0, 1.0}
+
+
+# --- equity_leg_regime_flips (M3.2 regime-flip metric) ----------------------
+
+
+def _weights_frame(qql3_values: list[float]) -> pd.DataFrame:
+    idx = _date_index(len(qql3_values))
+    other = [0.5] * len(qql3_values)
+    return pd.DataFrame({"QQL3": qql3_values, "IBTM": other}, index=idx)
+
+
+def test_regime_flips_counts_long_flat_transitions() -> None:
+    """QQL3 weight [0.5, 0.5, 0, 0, 0.5] → states [1,1,0,0,1] → 2 flips
+    (long→flat at idx 2, flat→long at idx 4)."""
+    weights = _weights_frame([0.5, 0.5, 0.0, 0.0, 0.5])
+    assert equity_leg_regime_flips(weights, equity_leg="QQL3") == 2
+
+
+def test_regime_flips_zero_when_constant() -> None:
+    weights = _weights_frame([0.5, 0.5, 0.5, 0.5])
+    assert equity_leg_regime_flips(weights, equity_leg="QQL3") == 0
+
+
+def test_regime_flips_counts_long_short_transition() -> None:
+    """A long→short transition (sign change) counts as a flip even with no
+    flat state between — generic over long/flat/short."""
+    weights = _weights_frame([0.5, -0.5])
+    assert equity_leg_regime_flips(weights, equity_leg="QQL3") == 1
+
+
+def test_regime_flips_missing_column_returns_zero() -> None:
+    weights = _weights_frame([0.5, 0.0, 0.5])
+    assert equity_leg_regime_flips(weights, equity_leg="NOT_THERE") == 0
+
+
+def test_regime_flips_single_row_returns_zero() -> None:
+    weights = _weights_frame([0.5])
+    assert equity_leg_regime_flips(weights, equity_leg="QQL3") == 0
+
+
+def test_regime_flips_empty_frame_returns_zero() -> None:
+    assert equity_leg_regime_flips(pd.DataFrame(), equity_leg="QQL3") == 0
+
+
+def test_regime_flips_tolerates_nan() -> None:
+    """A NaN weight is treated as flat (0); does not raise on the int cast."""
+    weights = _weights_frame([0.5, float("nan"), 0.5])
+    # states [1, 0, 1] → 2 flips.
+    assert equity_leg_regime_flips(weights, equity_leg="QQL3") == 2

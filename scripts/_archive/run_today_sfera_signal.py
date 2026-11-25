@@ -257,7 +257,7 @@ async def _run(args: argparse.Namespace) -> int:
             f"{order.instrument.symbol} MKT ..."
         )
         await broker.submit(order)
-        terminal_state, _ = await _drain_order_lifecycle(
+        terminal_state, _, _ = await _drain_order_lifecycle(
             broker=broker,
             target_id=ClientOrderId(order.client_order_id),
             timeout_s=args.event_wait_seconds,

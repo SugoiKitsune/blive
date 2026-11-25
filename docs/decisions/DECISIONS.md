@@ -3,8 +3,8 @@ id: KB-10
 title: Architectural Decision Records (ADRs)
 status: DRAFT
 owner: Claude record, Oleg approve
-last_reviewed: 2026-05-06
-version: 0.20
+last_reviewed: 2026-06-05
+version: 0.24
 sources: []
 depends_on:
   - KB-11   # OPEN_QUESTIONS — many ADRs resolve OQs
@@ -77,7 +77,10 @@ referenced_by:
 | [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) | PRIIPs-compliant universe for Phase 1 A3 strategy (refines ADR-043) | ACCEPTED | 2026-05-03 | — |
 | [ADR-048](#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046) | LSE-ETF SMART routing discriminator (refines ADR-046) | ACCEPTED | 2026-05-03 | — |
 | [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) | `OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding | ACCEPTED | 2026-05-06 | — |
-| [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) | EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only) | PROPOSED | 2026-05-06 | — |
+| [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) | EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only) | ACCEPTED | 2026-05-06 | — |
+| [ADR-051](#adr-051--normalize-ib-order-prices-to-the-contract-tick-grid-at-submit-time) | Normalize IB order prices to the contract tick grid at submit time | ACCEPTED | 2026-06-05 | — |
+| [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) | Phase 1 accepts the PMA-bound leveraged-leg non-fill (OQ-031 Option 1) | ACCEPTED | 2026-06-05 | OQ-031 |
+| [ADR-053](#adr-053--upgrade-to-python-312) | Upgrade to Python 3.12 | ACCEPTED | 2026-06-05 | — |
 
 ---
 
@@ -1912,6 +1915,7 @@ Adopt **session-bootstrap files** as the canonical L0 implementation under the a
 - **decider:** Oleg (with Claude)
 - **supersedes:** [ADR-021](#adr-021--cac-etf-proxy-cacpa-lyxor-cac-40-ucits-etf) — CAC ETF proxy as the Phase 1 strategy designation. The CAC.PA Instrument + Yahoo-suffix substrate per ADR-041 + DD-7 stay durable.
 - **amends:** [KB-5 §7 phased priority](../kb/strategy_taxonomy.md#7-nav-slice--priorities) — A3 promoted to Phase 1; A2 (`tkan_v4_momentum_timing`) demoted to deferred-no-target.
+- **refined-by:** [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) — Phase 1 accepts that the QQL3 (3×) leveraged equity leg structurally does not fill on the PMA-bound UK-retail account ([OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) Option 1). The QQL3 leg is **retained but provisional**; the leveraged-equity redesign is deferred to Phase 2 ([OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
 
 ### Context
 
@@ -2144,6 +2148,7 @@ The production `IBInstrumentResolver` routes US-equity venues via SMART:
 - **date:** 2026-05-03
 - **decider:** Oleg (with Claude)
 - **refines:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2)
+- **refined-by:** [ADR-052](#adr-052--phase-1-accepts-the-pma-bound-leveraged-leg-non-fill-oq-031-option-1) — the PRIIPs-substituted QQL3 (3×) leg structurally does not fill on the PMA-bound UK-retail account ([OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) Option 1); **retained but provisional** for Phase 1, leveraged-equity redesign deferred to Phase 2 ([OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
 
 ### Context
 
@@ -2352,7 +2357,7 @@ Two parts:
 
 ## ADR-050 — EODHD-vs-IB unit-of-quote conversion at sizing time (Hybrid: B-now / A-later free-MD-only)
 
-- **status:** PROPOSED (drafted 2026-05-06 at M3.1 entry; flips to ACCEPTED on first wire exercise of `scripts/run_m2ib6_ib_paper.py` against the converted price for QQL3 producing the IB-USD-equivalent quantity within ±1% and no IB error 110, per the established M2-IB PROPOSED-uncommitted-in-working-tree pattern)
+- **status:** ACCEPTED (drafted 2026-05-06 at M3.1 entry PROPOSED; flipped ACCEPTED 2026-06-05 on the clean LSE-RTH wire run — QQL3 sized 65 sh @ ~$39 IB-USD-equivalent and placed with **no IB error 110**, jointly with ADR-051 per Decision #5 / the M2-IB pattern)
 - **date:** 2026-05-06
 - **decider:** Oleg (with Claude)
 - **refines:** [ADR-014](#adr-014--data-sources-via-clean-api-abstraction) (data-source abstraction), [ADR-017](#adr-017--live-data-hybrid-eodhd--ib-streaming-per-instrument-routing) (hybrid EODHD+IB routing per-instrument), [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) (Sizer policy)
@@ -2440,6 +2445,186 @@ Five concrete commitments:
 
 ---
 
+## ADR-051 — Normalize IB order prices to the contract tick grid at submit time
+
+- **status:** ACCEPTED (drafted 2026-06-05 at M3.1b PROPOSED; flipped ACCEPTED 2026-06-05 on the clean LSE-RTH wire run — QQL3 limits snapped to its 0.10 grid on the live wire (`38.52→38.5`, `44.15→44.2`, …) and placed with **no IB error 110** (6 submitted, 0 rejected; IBTM filled), jointly with ADR-050 per Decision #6)
+- **date:** 2026-06-05
+- **decider:** Oleg (with Claude)
+- **refines:** [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) (contract facts), [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) / ADR-048 (SMART routing produces the contracts whose tick grids this snaps to)
+- **companion:** [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) (the *other* price-conditioning step — magnitude; this is grid), [INV-14](../inv/ib_error_codes.md) (error 110 now two sub-causes), [DD-7](../dd/instrument_dictionary.md) (tick / market-rule metadata)
+
+### Context
+
+The M3.1 wire-validation run on 2026-06-05 (`--order-type LMT --max-bars 5`, LSE RTH) confirmed [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only)'s unit-of-quote fix works — QQL3 sized **65 sh @ ~$39** (vs the pre-fix 6 sh @ ~$381), a clean ~10× correction — but surfaced a **second, independent cause of IB error 110**: tick-size non-conformance. blive's pipeline hardcoded limit-price rounding to `quantize(0.01)` (one penny), but QQL3's minimum price variation on LSEETF is **0.10**. Limit prices `38.52` / `42.83` / `44.15` were rejected (error 110) while `39.60` / `41.50` passed — the clean signature of a 0.10 tick grid.
+
+This is **distinct** from ADR-050: ADR-050 fixed the price *magnitude* (vendor→IB units); the price was correctly ~$39 yet still mis-rounded to a sub-tick value. The two were entangled in the original error-110 observation (a $381 price is *both* wrong-magnitude and off-grid), so fixing magnitude alone exposed the grid bug underneath.
+
+Generalising: the minimum price increment is (a) **per-contract**, (b) sometimes price-**banded** (LSE / Euronext / MiFID-II tick regimes grow the increment with price; IB encodes these as *market rules*), and (c) applies to **every priced field** (limit, stop), not just QQL3 limits. A QQL3-specific constant would re-break on the next instrument — the same failure mode ADR-050's catalogue avoids for magnitude.
+
+### Decision
+
+**Normalize every priced order to its contract's valid price grid at the adapter boundary (`IBBroker.submit`), automatically, using a per-contract increment table sourced from IB and a pure snapping function.** Six commitments:
+
+1. **Snap at submit, in the broker — universal by construction.** `IBBroker` snaps `limit_price` / `stop_price` to the contract grid inside `submit()` (the single `domain Order → ib_async order` chokepoint), so *any* strategy / pipeline / reconciliation-driven order is grid-valid without the caller knowing tick rules exist. Pipelines no longer round prices themselves — the hardcoded `quantize(0.01)` in `run_ib_(multi_)pipeline._ib_order_from_desired` is **removed**; pipelines emit the economically-intended price and the broker renders it venue-legal.
+
+2. **Magnitude vs grid live at different layers — on purpose.** ADR-050's unit-of-quote conversion stays at **sizing time** (the pipeline) because the share *quantity* depends on it. Grid-snapping lives at **submit time** (the broker) because it touches only the price field, never the quantity. The split is principled, not accidental: *magnitude changes how many shares; grid changes only the limit's last decimal.* Recorded so a future reader does not "unify" them into a sizing-time bug.
+
+3. **Band-table interface from day one (handles price-dependent ticks).** The snapping function consumes a **price-increment table** — `Sequence[PriceIncrement(low_edge, increment)]` — not a scalar. `IBPriceRuleService` populates it from the contract's **market rule** (`reqContractDetailsAsync` → `marketRuleIds` → `reqMarketRuleAsync` → `PriceIncrement` bands), falling back to a single-row `[(0, minTick)]` table when no rule is available. A flat-tick instrument (QQL3 ≈ 0.10) is just a one-row table; a banded venue works without redesign. Tables are cached per `Instrument` (mirrors the resolver's conId cache) with a `clear_cache` hook for M5 corp-action invalidation.
+
+4. **Pure, policy-parameterised snapping (OCP).** `snap_price(price, increments, *, side, policy)` is a pure function in `blive.adapters.shared.price_grid` (broker-agnostic; IG-reusable). `RoundingPolicy` defaults to **NEAREST** (the sub-tick move is dwarfed by the pipeline's ±50bps limit buffer and is unbiased); **CONSERVATIVE** (BUY↓ / SELL↑ — never worse than the computed price) is implemented and parked as the recommended real-money policy. New policies / venues extend behaviour without modifying the snap core.
+
+5. **Block (don't ship) on missing tick metadata.** If `reqContractDetailsAsync` yields neither a market rule nor a positive `minTick`, `IBPriceRuleService` raises `PriceRuleUnavailable` and the broker does **not** place the order — it surfaces a `REJECTED` with a clear diagnostic rather than send a price it cannot validate (which would reproduce error 110). The cost is bounded: the table is cached after first success, so the only window a fetch failure can block is the *first* order for an instrument per process.
+
+6. **PROPOSED → ACCEPTED on first clean wire run, jointly with ADR-050.** Same pattern as ADR-050: stays PROPOSED until an LSE-RTH `--order-type LMT --max-bars 5` run places QQL3 / IBTL / IBTM limits with **no IB error 110**. Because ADR-050's flip criterion *also* requires "no error 110", the two now flip **jointly** on that run (the magnitude fix is necessary but not sufficient — the grid fix is the missing half). The wire-validation commit flips both header-only.
+
+### Alternatives Considered
+
+1. **Per-instrument tick catalogue (mirror ADR-050's conventions dict).** Rejected as the *primary* source — tick size is an authoritative IB contract fact available over the wire; a hand-maintained catalogue would drift and duplicate what `reqContractDetails` already knows. (The market-rule fetch *is* the generalisation; `minTick` is the fallback.)
+2. **Round to a coarse fixed tick (e.g. 0.05 / 0.10) for everyone.** Rejected — wrong for fine-tick instruments (US equities 0.01), needlessly degrades prices, still wrong for banded venues at high prices.
+3. **Catch error 110 and retry with an adjusted price.** Rejected — reactive, costs a wire round-trip + pacing budget per retry, and the error doesn't tell you the correct increment.
+4. **`minTick` only (ignore market rules).** Rejected as the design, kept as the *fallback* — insufficient for banded venues where the valid tick at a given price is coarser than the global `minTick`.
+5. **Snap in the Sizer (domain).** Rejected — violates [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) Sizer purity; the Sizer is broker-neutral and has no contract / venue data.
+6. **Snap in each pipeline explicitly.** Rejected — every strategy / pipeline would have to remember; the whole point is that the broker makes it impossible to forget.
+
+### Consequences
+
+- **Positive:** error 110 from off-grid prices is structurally impossible for any order through `IBBroker` — not just QQL3, not just the current pipelines. The pipeline gets *simpler* (drops its rounding line). Banded venues are handled. The pure snapping fn is exhaustively unit-testable.
+- **Positive:** clean composition with ADR-050 — convert magnitude (pipeline), then snap grid (broker); both are "render economic intent into a venue-legal instruction", at the right layers.
+- **Positive / division of labour:** RC-10 (magnitude sanity, ±50%) catches *wrong* prices before submit; snapping handles *increment* validity. A wildly-off price is caught by RC-10; snapping only ever moves a sane price by <1 tick. No new RiskCheck needed.
+- **Negative / cost:** first order per instrument per process pays 1–2 cached wire calls (`reqContractDetails` + `reqMarketRule`) against the `global` pacing budget ([KB-3](../kb/ib_pacing_spec.md)). Cached thereafter; negligible.
+- **Negative / risk — band-crossing on round-up.** Rounding up across a band boundary could in principle land off the higher band's grid; benign in practice because IB constructs band edges to sit on the coarser grid. Documented as an assumption; revisit only if a venue violates it.
+- **Follow-ups:**
+  - Wire exercise (joint with ADR-050): `--order-type LMT --max-bars 5` LSE RTH; QQL3 / IBTL / IBTM limits placed with no error 110; flip ADR-050 + ADR-051 PROPOSED → ACCEPTED.
+  - INV-14 error 110 row: document the two sub-causes (magnitude → ADR-050; tick grid → ADR-051).
+  - DD-7: per-contract tick / market-rule metadata now sourced + cached by `IBPriceRuleService`.
+  - Size / lot conformance (`minSize` / `sizeIncrement`) is the **same seam** (broker-on-submit, contract-rule-cached) — left as a documented forward-extension, not built (no Phase 1 instrument needs it).
+
+### Cross-References
+
+- [ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only) — the magnitude half of price-conditioning; this is the grid half. The two flip ACCEPTED jointly on the clean LMT wire run.
+- [ADR-027](#adr-027--sizer-rounding-policy-integer-shares-truncate-toward-zero) — Sizer purity preserved (snapping is in the broker, not the Sizer).
+- [ADR-032](#adr-032--instrument-resolution-policy-blive-instrument--ib-contract) / [ADR-046](#adr-046--ib-resolver-smart-routing-for-us-equities-refines-adr-032) / ADR-048 — instrument resolution + SMART routing produce the contracts whose tick grids this reads.
+- [INV-14](../inv/ib_error_codes.md) — error 110 second sub-cause (tick non-conformance).
+- [DD-7](../dd/instrument_dictionary.md) — tick / market-rule metadata.
+- `blive.adapters.shared.price_grid` (pure snap) / `blive.adapters.ib.price_rules` (IB source + cache) — the implementation.
+
+---
+
+## ADR-052 — Phase 1 accepts the PMA-bound leveraged-leg non-fill (OQ-031 Option 1)
+
+- **status:** ACCEPTED (drafted 2026-06-05 at M3.3 PROPOSED; flipped ACCEPTED same-session on operator confirm — resolves [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) on the M3.2 empirical capture)
+- **date:** 2026-06-05
+- **decider:** Oleg (with Claude)
+- **supersedes:** none
+- **resolves:** [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) (Phase 1 deployment under PMA-bound retail account)
+- **refines:** [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) (Phase 1 A3 strategy), [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) (PRIIPs universe) — the QQL3 leveraged leg is retained for Phase 1 but flagged *provisional* (both carry a `refined-by: ADR-052` backref); the leveraged-equity redesign is deferred to Phase 2 ([OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)).
+- **companion:** [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) (the empirical PMA-cap finding this operationalises), [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) (margin-financed leverage — basis for OQ-032's leverage-preserving path), [INV-14 v0.9](../inv/ib_error_codes.md) (warning 2161 + error-110 rows)
+
+### Context
+
+[OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) asked which of four deployment-mode options Phase 1 commits to for live cutover (G4), given M2-IB.6.2c's finding that IB warning 2161 (Price Management Algo / regulatory disruptive-orders cap) binds structurally on QQL3 (3× Nasdaq leveraged ETP on LSEETF) for the operator's UK-retail IB-Paper account. M3 sequenced this *inform-then-resolve* ([TASK_REGISTRY](../../TASK_REGISTRY.md) plan-call #1): M3.2 captures the fill profile; M3.3 (this ADR) resolves on the data.
+
+**The M3.2 evidence** (`~/.blive/data/m3_2_window/runs.jsonl`, two flip-spanning LSE-RTH replay captures 2026-06-05, on now-correctly-sized ([ADR-050](#adr-050--eodhd-vs-ib-unit-of-quote-conversion-at-sizing-time-hybrid-b-now--a-later-free-md-only)) and on-grid ([ADR-051](#adr-051--normalize-ib-order-prices-to-the-contract-tick-grid-at-submit-time)) orders — **zero error 110, zero rejects, zero breaches**):
+
+| Run | window | regime flips | QQL3 sub/fill | IBTM sub/fill | 2161 cap-binding |
+|-----|--------|--------------|---------------|---------------|------------------|
+| 1   | `--max-bars 40` | 2 | 25 / **0** | 3 / **3** | 0 |
+| 2   | `--max-bars 60` | 2 | 44 / **0** | 3 / **3** | 0 |
+| agg | — | 4 | **69 / 0 (0%)** | **6 / 6 (100%)** | **0** |
+
+Every QQL3 order reached ACCEPTED then CANCELED on engine-timeout (`observed_error_codes` = `{202: N}`, IB cancel confirmations); every IBTM order reached ACCEPTED then FILLED. **The 3× leveraged equity leg does not fill; the 1× Treasury leg fills cleanly.**
+
+Load-bearing nuance: QQL3 was routed `ADAPTIVE_MKT` (per the driver's `order_type_by_symbol` map), so the *visible* 2161 cap never fired (`cap_binding_2161_count` 0, `mktCapPrice` 0.0) — yet QQL3 still did not fill, unlike the M2-IB.6.2c raw-MKT runs where 2161 fired visibly. **The non-fill is robust to the order-type mechanism**: the equity leg fails via the visible PMA cap (raw MKT) *and* via the Adaptive algo declining to cross within the wait. Two honest caveats, recorded not buried: (a) the capture's 10s `--event-wait-seconds` contributes to the Adaptive non-fill — a longer-resting live order could mean-revert into a fill — but the raw-MKT cap binds independent of time (M2-IB.6.2c's 60s wait was also 0/5) and the structural PMA constraint on leveraged ETPs for UK retail is established, so only the *exact* live fill-rate is open (it re-derives at M7 parity); (b) IBTL had no eligibility-driven orders in these windows, so the Treasury evidence is IBTM-only.
+
+### Decision
+
+**Resolve OQ-031 with Option 1: accept the leveraged-equity-leg non-fill as a real Phase-1 deployment characteristic — no code change — and defer the leveraged-leg redesign to Phase 2.**
+
+1. **Phase 1 deploys A3 as-is**, with the documented understanding that on this PMA-bound UK-retail account the QQL3 (3×) leg structurally ≈ never fills, so **live behaviour is Treasury-leg-dominated** (the strategy executes effectively as its 1× Treasury sleeve). Acceptable for Phase 1 because Phase 1's purpose is *execution-stack validation* — which the M2-IB → M3 ladder has substantially completed (FSM, SMART/LSEETF routing, sizing per ADR-050, tick-grid per ADR-051, RiskEngine, mixed-currency surface all wire-validated; the remaining M3.4–M3.6 items are P&L-reconciliation / chaos-drill / KB-STABLE work, not execution-correctness gaps) — **not** P&L generation on a paper account.
+
+2. **No amendment to ADR-043 / ADR-047 now, and no new RiskCheck or order-path code.** The QQL3 leg is *retained* for Phase 1 but flagged **provisional** (a `refined-by: ADR-052` backref is added to ADR-043 + ADR-047 frontmatter for discoverability): its non-fill is a known, documented execution property, not a defect.
+
+3. **The redesign that would restore the strategy's intended leveraged equity exposure is forward-listed to Phase 2 entry, captured as [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure).** Phase 1 surfaced a deeper constraint — a *trilemma*: a UK-retail **Cash** account has **no** open path to leveraged equity exposure. **PRIIPs/KID** blocks US-domiciled leveraged ETPs (ADR-047); the **PMA cap (2161)** blocks UK-listed leveraged ETPs (ADR-049 / this ADR); a **Cash** account blocks margin-financed leverage. OQ-032 carries the *full* design space — including the **leverage-preserving** path (≈3× via 3:1 margin on a plain 1× Nasdaq-100 UCITS ETF, whose ~1–1.5% daily range very likely does not trip the volatility-triggered PMA cap; per [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) blive already supports margin-financed leverage) **alongside** de-levering to 1×/1×, Pro-Client classification, a mean-reversion restructure, and an archetype swap. The M3→M4 boundary is the natural home for this strategy-identity decision, where the M7 parity re-derivation informs it.
+
+4. **Live-cutover posture:** before any real-money cutover (M8, well beyond G4) the operator monitors the QQL3 fill-rate empirically; if the Treasury-dominated profile is unacceptable for live, the Phase-2 redesign (OQ-032) supersedes this acceptance. Options 2 (Pro Client) and 4 (passive-limit-only) remain available re-entry points but are not chosen now.
+
+### Alternatives Considered
+
+1. **Option 3 — substitute the leveraged leg now** (UK-listed 1× UCITS Nasdaq analogue → 1×/1×). The 0% fill is the strongest argument for it, and it is the only OQ-031 option that makes the strategy trade both legs — but it *drops* the leverage. **Deferred, not rejected:** it changes strategy identity (amends ADR-043 + ADR-047) and costs a universe re-validation half-session. Deferred into [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure), which carries the *broader* design space — including the **leverage-preserving** margin-on-1×-UCITS path that none of the four OQ-031 options captured (the omission this ADR's review corrected).
+2. **Option 2 — MiFID II Professional Client classification** (enables `priceManagementOff`, so QQL3 itself fills — a leverage-*preserving* path). Declined at M2-IB.6.1; the M3.2 data does not move the wealth / experience / transaction-frequency thresholds. Re-entry point preserved via OQ-032.
+3. **Option 4 — passive-limit-only restructure** (embrace the cap as a mean-reversion model; keeps the leveraged ETP but changes the strategy's character). Largest pivot from the A3 trend-following intent; needs a fresh ADR + re-derived parity envelope. The data does not point here — the equity leg's non-fill is a constraint to design around, not evidence the strategy *should* mean-revert.
+
+### Consequences
+
+- **Positive:** M3 gets an auditable, data-grounded deployment-mode commitment (data → Option 1 → why) with **no code change / no regression risk** — G3-IB-A3 and all M2-IB wire validations stand unchanged.
+- **Positive:** the strategy-identity decision lands at the phase boundary where it belongs, informed by the M7 parity re-derivation, not rushed into a Phase-1-close edit; OQ-032 preserves the *full* design space (incl. the leverage-preserving margin path) so the Phase-2 decision is not pre-narrowed toward de-levering.
+- **Negative / honest:** the Phase 1 *strategy as deployed* is materially not the intended 3×/1× trend-follower — it is a 1× Treasury sleeve in practice. Acceptable only under "Phase 1 = validate the engine"; explicitly **not** a real-money endorsement of A3-as-is.
+- **Negative / risk:** if a future change makes the equity leg fill (account / venue change), live behaviour shifts toward the 3× profile without re-validation; mitigated because OQ-032 owns the redesign and any such change routes through it.
+- **Follow-ups:**
+  - Open [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) — Phase 2 A3 leveraged-leg redesign (full design space; target Phase 2 entry / M4).
+  - Flip OQ-031 OPEN → RESOLVED-BY-ADR-052 (status field only; body untouched, append-only).
+  - Add `refined-by: ADR-052` to ADR-043 + ADR-047 frontmatter (discoverability; the QQL3 leg is now provisional).
+  - TASK_REGISTRY M3.3 marked resolved; G4 exit-criterion #1 satisfied. No INV-14 / INV-4 / code change.
+
+### Cross-References
+
+- [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) — resolved by this ADR (Option 1).
+- [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) — the deferred Phase-2 redesign this ADR forward-lists (carries the leverage-preserving margin path).
+- [ADR-049](#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding) — the empirical PMA-cap finding this operationalises into a deployment decision.
+- [ADR-043](#adr-043--phase-1-strategy-switch-triple_lev_sma_filter_dsl-a3-replaces-tkan_v4_momentum_timing-a2) / [ADR-047](#adr-047--priips-compliant-universe-for-phase-1-a3-strategy-refines-adr-043) — the A3 strategy + PRIIPs universe whose QQL3 leg is retained-but-provisional for Phase 1.
+- [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments) — blive supports margin-financed leverage (the basis for OQ-032's leverage-preserving path).
+- [INV-14 v0.9](../inv/ib_error_codes.md) — warning 2161 (PMA cap) + error-110 rows.
+- M3.2 capture: `~/.blive/data/m3_2_window/runs.jsonl` (two flip-spanning runs, 2026-06-05) — the empirical basis.
+
+---
+
+## ADR-053 — Upgrade to Python 3.12
+
+- **status:** ACCEPTED (operator-authorised 2026-06-05; `.venv` recreated on 3.12.12 with all gates green — 591 tests, mypy --strict, black, isort, lint-imports)
+- **date:** 2026-06-05
+- **decider:** Oleg (with Claude)
+- **supersedes:** none (the "Python 3.11.x exactly" baseline lived in CLAUDE.md + pyproject, never a formal ADR; this ADR establishes the version policy)
+- **companion:** btest `fd106f9` (requires-python relax) + `32dab28` (remove unused/broken `signum`); [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) (the Phase-2 strategy that motivated it)
+
+### Context
+
+blive — and its editable sibling `quantdsl-backtest` (btest) — pinned **Python 3.11.x exactly** as a bootstrap choice. Phase 2's incoming strategy (the VIX-term-structure backtest in `lab/research/r_lev_001_triple_leveraged_etf`, which feeds [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure)) requires **Python 3.12**. Since blive imports btest editable, both must move together.
+
+A non-destructive 3.12 resolution + install + dual-suite dry-run (2026-06-05) proved feasibility: every C-extension dep has 3.12 wheels (numba 0.65.1, vectorbt 1.0.0, arcticdb 6.18.0), **blive's 591 tests and btest's 317 unit tests pass on 3.12**, and the only snags were tooling-side (not 3.12): btest's `requires-python` pin, an unused-but-broken `signum` optional dep, pandas over-reaching to the breaking 3.0 major, and mypy floating to 2.x (1 new finding). The current env was *already* on the modern majors (numpy 2.4, pandas 2.3, numba 0.65, vectorbt 1.0), so 3.12 is "same deps, newer interpreter".
+
+### Decision
+
+**Adopt Python 3.12** (the latest *viable* — see alternatives).
+
+1. **`requires-python = ">=3.11"`** in blive + btest (allow 3.11 *and* 3.12 through the transition; don't strand anyone on 3.11). `[tool.mypy] python_version = "3.12"`; `[tool.black] target-version = ["py312"]`.
+2. **Pin `pandas>=2.0,<3.0`.** pandas 3.0 is a breaking major (Copy-on-Write default, etc.); isolate the interpreter change from a dataframe-semantics change. numpy stays 2.x (already there).
+3. **Adopt mypy 2.x, pinned `==2.1.0`** (like black/isort — the type gate's output must be reproducible). The one new 2.x finding — `float()` on a `Series`-typed scalar access in `ib_pipeline.py` — is fixed with a `cast` (the runtime value is a scalar). Chosen over pinning `mypy<2`, to keep the type checker current.
+4. **btest: removed the unused/broken `signum`** core dep (research-only charting, try/except-guarded, never imported in `src`/tests; its git repo publishes mismatched `signum-charts` metadata that breaks `uv`). It blocked the 3.12 resolve (btest `32dab28`).
+5. **Recreated `.venv` on 3.12** (`uv venv --python 3.12` + `uv sync --extra dev`); `uv.lock` re-locked. All gates green.
+
+### Alternatives Considered
+
+1. **Stay on 3.11.** Rejected — Phase 2's strategy needs 3.12; deferring just moves the work.
+2. **Go to the latest (3.13 / 3.14).** Rejected — `numba` / `vectorbt` / `arcticdb` lag newer CPython; 3.12 is the latest version btest's heavy dep tree installs on. 3.13+ is a future step once those catch up.
+3. **Pin `mypy<2`** (zero code change). Rejected — the one finding is a legitimate 1-line typing fix; keeping mypy current is worth more.
+4. **Let pandas float to 3.0.** Rejected for *this* change — it couples the interpreter upgrade to a breaking dataframe major; pin `<3` and revisit pandas 3.0 on its own.
+
+### Consequences
+
+- **Positive:** blive + btest run on 3.12; Phase 2's 3.12-only strategy is unblocked; the dep tree is modern + 3.12-wheeled.
+- **Positive:** the formatter + type gates are now all version-pinned (black 26.3.1, isort 8.0.1, mypy 2.1.0) — the gate is fully reproducible (the lesson from the M2-IG-era black drift).
+- **Negative / deferred:** pandas 3.0 and Python 3.13/3.14 are deliberately deferred (separate steps, when deps catch up). `signum` research charts must be installed manually (corrected name `signum-charts`).
+- **Negative / risk:** `requires-python >=3.11` still allows 3.11 — acceptable during the transition; tighten to `>=3.12` once 3.11 is retired.
+- **Follow-ups:** revisit pandas 3.0 + Python 3.13 when numba/vectorbt support them; consider `requires-python >=3.12` later.
+
+### Cross-References
+
+- btest `fd106f9` (requires-python >=3.11) + `32dab28` (remove signum) — the sibling-repo half.
+- [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure) — the Phase-2 strategy redesign whose VIX/TQQQ/VXX notebook needs 3.12.
+- `pyproject.toml` (requires-python / mypy / black / pandas / mypy pins); `uv.lock` (re-locked for 3.12); `src/blive/runtime/ib_pipeline.py` (the mypy 2.x cast fix); `CLAUDE.md` (toolchain line).
+
+---
+
 ## Changelog
 
 - **v0.1 (2026-04-26)** — initial bootstrap. ADR-001..012 backfill from REQUIREMENTS rationale; ADR-013..019 from Oleg's 2026-04-26 OQ resolution session.
@@ -2462,3 +2647,7 @@ Five concrete commitments:
 - **v0.18 (2026-05-06)** — Added ADR-049 (`OrderType.ADAPTIVE_MKT` for IBALGO Adaptive routing + empirical PMA-cap finding — refines ADR-027, companion to ADR-046 / ADR-048) **PROPOSED**. The M2-IB.6.2b/c LSE-RTH validation runs on 2026-05-06 surfaced IB warning **2161** (Price Management Algo / regulatory disruptive-orders cap) on QQL3 (3× Nasdaq leveraged ETP on LSEETF), preventing fills despite the order reaching ACCEPTED state — IB caps the effective limit price to the live bid/ask reference, and BUY orders capped at the bid don't fill in rising markets. ADR-049 adds `OrderType.ADAPTIVE_MKT` (IB IBALGO Adaptive variant of MKT) per IB's recommended workaround in the warning text — wire-validated as correctly-routed (algoStrategy='Adaptive' + algoParams set on the ib_async order; FSM trace differs) — but **empirically confirmed across four progressive wire runs that the 2161 cap binds structurally on UK retail accounts regardless of order type**: raw MKT (10s + 60s waits), ADAPTIVE_MKT, and LMT @ $50 (well above IB's ~$39 reference) all see `mktCapPrice` set and zero fills on QQL3. The `priceManagementOff` order flag (institutional-only opt-out) is unavailable to retail. Bypass requires either MiFID II Professional Client classification (declined per ADR-047 alt #2) or non-leveraged-product substitution. Documented as INV-14 v0.7 (catalogued + validation-matrix); raises OQ-031 ("Phase 1 deployment under PMA-bound retail") for pre-cutover resolution. `OrderType.ADAPTIVE_MKT` infrastructure stays — useful tooling for non-cap-bound venues / future strategies — captured in `src/blive/domain/types.py`, `src/blive/adapters/ib/broker.py`, `src/blive/runtime/ib_pipeline.py` (per-symbol order_type override), `scripts/run_m2ib6_ib_paper.py` (QQL3 → ADAPTIVE_MKT mapping), `tests/unit/adapters/ib/test_broker.py` (test_submit_adaptive_mkt_order_routes_via_ibalgo). Side-finding (not promoted into a separate ADR; flagged as M7 parity concern): EODHD reports QQL3 close ~$383 while IB reference is ~$39 — a 10× discrepancy, likely a recent reverse-split or EODHD unit-of-quote convention; the strategy's sizing/limit-pricing uses EODHD's price → 10× too high → IB rejects with error 110 (price out of allowed range) before 2161 even fires when LMTs are computed from EODHD close × multiplier.
 - **v0.17 (2026-05-03)** — Added ADR-048 (LSE-ETF SMART routing discriminator — refines ADR-046) **PROPOSED**. The M2-IB.6.2 wire run with the ADR-047 universe returned IB error 200 on every order: bare `XLON → "LSE"` direct routing does not expose UCITS / ETP listings (the LSE main book and LSE ETF book are distinct IB venues — LSEETF). Direct probe via `reqContractDetails` confirmed all three Phase 1 tradables resolve cleanly via `Contract(exchange="SMART", primaryExchange="LSEETF")`. ADR-048 codifies the discriminator: `XLON + ETF → SMART/LSEETF`, `XLON + EQUITY → LSE` (direct, unchanged). Mirrors the ADR-046 US-equity SMART pattern shape. Status PROPOSED until the LSE RTH wake-up on Tue 2026-05-05 produces actual fills (M2-IB.6.2 smoke reached PreSubmitted / cancelled at engine timeout — LSE was closed Sun + UK May Day Bank Holiday Mon). Code change already landed in `c34267d`; substrate ADR-048 + DD-7 §3 follow-up land in this commit. **Side-finding documented inline (out of ADR-048 scope):** IBTL/IBTM on LSEETF resolve to GBP-hedged accumulating share classes (IB doesn't expose USD distributing classes for these symbols); QQL3 trades USD-denominated. Phase 1 P&L is mixed-currency (USD on QQL3, GBP-hedged on IBTL/IBTM). Documented in `scripts/run_m2ib6_ib_paper.py`; pivot to `IDTL` / `IDTM` USD distributing share classes (Path B) is a separate Phase 1 universe revision, not a routing-discriminator change.
 - **v0.20 (2026-05-06 / M3.1 entry)** — Added ADR-050 (EODHD-vs-IB unit-of-quote conversion at sizing time — Hybrid B-now / A-later free-MD-only) **PROPOSED**. Operationalises the M3.1 narrow-scope sizing fix per [TASK_REGISTRY M3.1](../../TASK_REGISTRY.md): Route B (per-instrument convention catalogue at `src/blive/adapters/eodhd/conventions.py`) ships now; Route A (live-IB-MD reference for sizing) reserved for M7 but **bounded to free IB market-data tiers only** (operator-stated cost discipline; LSEETF and other paid subscriptions out of scope indefinitely). The 2026-05-06 EODHD-side investigation (`scripts/probe_qql3_unit_of_quote.py`) refuted the `adjusted_close` and currency-convention hypotheses; the operative cause is a recent reverse-split that EODHD has not yet propagated. Catalogue v0.1 entry for QQL3: `MANUAL_SCALE(divisor=10.0, source="IB live reference, M2-IB.6.2c")`. Companion edits in same M3.1 commit batch: RC-10 (price sanity, ±50% threshold) implemented in `blive.risk` per [INV-4 v0.2](../inv/risk_checks.md); KB-15 (`parity_methodology`) MISSING → DRAFT v0.1 (unit-of-quote / reverse-split section only); INV-14 grows the error 110 row promotion; DD-7 footnote on the QQL3 reverse-split convention; pipeline `_price_lookup` closure routes through the conventions catalogue. Status PROPOSED until the M3.1 wire-validation run produces a QQL3 sized within ±1% of the IB-USD-equivalent target exposure with no IB error 110; flips to ACCEPTED in the wire-validation commit per the established same-day-ACCEPTED pattern.
+- **v0.21 (2026-06-05 / M3.1b)** — Added ADR-051 (Normalize IB order prices to the contract tick grid at submit time) **PROPOSED**. The 2026-06-05 M3.1 wire-validation run (`--order-type LMT --max-bars 5`, LSE RTH) confirmed ADR-050's unit-of-quote fix (QQL3 sized 65 sh @ ~$39 vs the pre-fix 6 sh @ ~$381) but surfaced a *second, independent* cause of IB error 110: tick-size non-conformance (QQL3's LSEETF minimum price variation is 0.10; blive's pipeline hardcoded `quantize(0.01)`, so 38.52 / 42.83 / 44.15 were rejected while 39.60 / 41.50 passed). ADR-051 moves price-grid conformance to the broker's `submit()` chokepoint: a pure `snap_price` (`blive.adapters.shared.price_grid`) + an IB increment-table source/cache (`blive.adapters.ib.price_rules` — market rule with `minTick` fallback, per-`Instrument` cache + `clear_cache`); the pipeline's `quantize(0.01)` is removed. Magnitude (ADR-050) stays at sizing time, grid (ADR-051) at submit time — distinct layers by design. Because ADR-050's flip criterion also requires "no error 110", ADR-050 + ADR-051 now flip PROPOSED → ACCEPTED **jointly** on the first clean LMT wire run. Companion edits in this batch: INV-14 error 110 row (two sub-causes), DD-7 (per-contract tick / market-rule metadata), TASK_REGISTRY M3.1 → M3.1b, CONTEXT_INVENTORY banner. Size/lot conformance noted as the same-seam forward-extension (not built). All ADRs ACCEPTED as of v0.21 **except** ADR-050 + ADR-051 (PROPOSED; joint wire-flip pending) and ADR-021 (SUPERSEDED-BY-ADR-043).
+- **v0.22 (2026-06-05 / M3.1b wire-validation)** — ADR-050 + ADR-051 flipped PROPOSED → ACCEPTED **jointly** on the clean LSE-RTH wire run (`run_m2ib6_ib_paper.py --order-type LMT --max-bars 5`, 2026-06-05 11:38 BST). QQL3 limits snapped to its 0.10 LSEETF tick grid on the *live* wire (`38.519640 → 38.5`, `39.600015 → 39.6`, `41.500470 → 41.5`, `42.830085 → 42.8`, `44.152665 → 44.2`) and placed with **zero IB error 110** (6 submitted, 0 rejected; IBTM filled). QQL3 reaches ACCEPTED → CANCELED cleanly — the residual no-fill is the structural 2161 PMA-cap / resting-LMT behaviour tracked in [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) (M3.2/M3.3), not a tick or magnitude issue. Both ADR bodies unchanged (append-only); status fields + index rows flipped with the date trail. **All ADRs ACCEPTED as of v0.22 except ADR-021 (SUPERSEDED-BY-ADR-043).**
+- **v0.23 (2026-06-05 / M3.3 OQ-031 resolution)** — Added **ADR-052** (Phase 1 accepts the PMA-bound leveraged-leg non-fill — OQ-031 Option 1) ACCEPTED (drafted PROPOSED then ACCEPTED same-session on operator confirm). Resolves [OQ-031](OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account) on the M3.2 empirical capture (QQL3 0/69 fills = 0% vs IBTM 6/6 = 100%; 2161 cap-binding 0; zero rejects / breaches / error-110 across two flip-spanning LSE-RTH runs): Phase 1 deploys A3 accepting the 3× leveraged equity leg ≈ never fills (live behaviour Treasury-leg-dominated), **no code change**; the leveraged-leg redesign is deferred to Phase 2 as [OQ-032](OPEN_QUESTIONS.md#oq-032--phase-2-a3-leveraged-leg-redesign-how-or-whether-to-restore-leveraged-equity-exposure). OQ-032 carries the *full* design space — including the **leverage-preserving** margin-on-a-1×-UCITS path (≈3× via 3:1 margin on a low-volatility 1× Nasdaq-100 UCITS that likely dodges the volatility-triggered PMA cap, per [ADR-016](#adr-016--leverage-support-both-margin-financed-and-leveraged-etf-instruments)) that the four OQ-031 options had omitted — the honest scope is a *trilemma* (PRIIPs blocks US leveraged ETPs, PMA blocks UK ones, Cash blocks margin-leverage). Companion edits (append-only / frontmatter-only): OQ-031 status OPEN → RESOLVED-BY-ADR-052; OQ-032 raised; `refined-by: ADR-052` backref added to ADR-043 + ADR-047 frontmatter (the QQL3 leg is now provisional — a new backref convention, the discoverability mirror of the supersede-chain); TASK_REGISTRY M3.3 resolved + G4 exit-criterion #1 satisfied; CONTEXT_INVENTORY §10 + banner. No code / INV-14 / INV-4 change (Option 1 = no code change); tests unchanged at 590. **All ADRs ACCEPTED as of v0.23 except ADR-021 (SUPERSEDED-BY-ADR-043).**
+- **v0.24 (2026-06-05 / Python 3.12 upgrade)** — Added **ADR-053** (Upgrade to Python 3.12) ACCEPTED. Standalone tooling change (not a milestone deliverable): blive + btest move from "Python 3.11.x exactly" to **3.12** (`requires-python >=3.11`, `mypy python_version 3.12`, `black target py312`), motivated by Phase 2's VIX-term-structure strategy (the `r_lev_001` notebook / OQ-032) which needs 3.12. A non-destructive dry-run validated the full dep tree on 3.12 (numba 0.65.1 / vectorbt 1.0.0 / arcticdb 6.18.0 all have 3.12 wheels; blive 591 + btest 317 tests pass). Companion changes: `pandas` pinned `<3` (avoid the breaking 3.0 major); mypy bumped to 2.x pinned `==2.1.0` (the one new finding — `float(Series)` in `ib_pipeline.py` — fixed with a `cast`); btest's unused/broken `signum` optional dep removed (commits `fd106f9` + `32dab28`). `.venv` recreated on 3.12.12; `uv.lock` re-locked; all gates green. **All ADRs ACCEPTED as of v0.24 except ADR-021 (SUPERSEDED-BY-ADR-043).**

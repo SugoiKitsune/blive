@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Sequence
 from unittest.mock import AsyncMock, MagicMock
 
 import eventkit
@@ -32,6 +33,7 @@ from blive.adapters.ib.broker import IBBroker, IBShapeError
 from blive.adapters.ib.client import IBClient
 from blive.adapters.ib.credentials import IBCredentials
 from blive.adapters.ib.instrument_resolver import IBInstrumentResolver
+from blive.adapters.shared.price_grid import PriceIncrement
 from blive.adapters.shared.rate_limiter import (
     RateLimitBucket,
     RateLimitConfig,
@@ -40,6 +42,7 @@ from blive.adapters.shared.rate_limiter import (
 from blive.domain.events import AccountUpdate, ConnectionStatus, OrderEvent
 from blive.domain.types import (
     AssetClass,
+    Instrument,
     Order,
     OrderEventKind,
     OrderSide,
@@ -127,6 +130,15 @@ def _make_mock_ib(
     return m
 
 
+class _StubPriceRules:
+    """Permissive ADR-051 price-grid provider for the broker suite: a 0.01
+    grid leaves the on-grid test limit prices unchanged. Tick-snapping
+    itself is exercised in ``test_broker_tick_grid.py``."""
+
+    async def increments_for(self, instrument: Instrument) -> Sequence[PriceIncrement]:
+        return (PriceIncrement(Decimal("0"), Decimal("0.01")),)
+
+
 def _make_broker(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,
@@ -135,7 +147,7 @@ def _make_broker(
 ) -> IBBroker:
     client = IBClient(credentials=credentials, rate_limiter=rate_limiter, clock=clock, ib=mock_ib)
     resolver = IBInstrumentResolver(client)
-    return IBBroker(client=client, resolver=resolver, clock=clock)
+    return IBBroker(client=client, resolver=resolver, clock=clock, price_rules=_StubPriceRules())
 
 
 def _ib_account_value(
@@ -531,6 +543,59 @@ async def test_account_snapshot_filters_other_account_pushes(
 
     snapshot = await broker.account_snapshot()
     assert snapshot.equity == Decimal("100000.00")  # not overwritten
+
+
+async def test_account_snapshot_mixed_currency_reads_base_total(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """Mixed-currency account: equity is the consolidated BASE total, not the
+    base-currency sleeve (M3.4 finding, 2026-06-05 live IB DUP886336).
+
+    IB reports ``NetLiquidationByCurrency`` for the base-currency *sleeve*
+    (GBP-denominated holdings only) AND a "BASE" aggregate (the whole account).
+    Reading the GBP sleeve (£902,839) silently dropped the USD cash (~£101k)
+    vs the true total (£1,003,886). ``base_currency`` is inferred from the unit
+    ``ExchangeRate`` row, not by comparing unconverted cross-currency magnitudes.
+    """
+    initial = [
+        # NetLiquidation: GBP sleeve, USD sleeve, and the BASE consolidated total.
+        _ib_account_value(tag="NetLiquidationByCurrency", value="1003885.69", currency="BASE"),
+        _ib_account_value(tag="NetLiquidationByCurrency", value="902839.13", currency="GBP"),
+        _ib_account_value(tag="NetLiquidationByCurrency", value="134724.51", currency="USD"),
+        # Cash per currency (the "BASE" aggregate row is excluded from cash_by_ccy).
+        _ib_account_value(tag="TotalCashBalance", value="1003620.33", currency="BASE"),
+        _ib_account_value(tag="TotalCashBalance", value="902573.77", currency="GBP"),
+        _ib_account_value(tag="TotalCashBalance", value="134724.51", currency="USD"),
+        # ExchangeRate: the base currency reports a unit rate; others are FX rates.
+        _ib_account_value(tag="ExchangeRate", value="1.00", currency="GBP"),
+        _ib_account_value(tag="ExchangeRate", value="0.7449588", currency="USD"),
+        # Base-only aggregates (no "BASE" row — only the base-currency sleeve).
+        _ib_account_value(tag="BuyingPower", value="4014481.32", currency="GBP"),
+        _ib_account_value(tag="GrossPositionValue", value="0.00", currency="GBP"),
+        _ib_account_value(tag="MaintMarginReq", value="0.00", currency="GBP"),
+    ]
+    mock_ib = _make_mock_ib(initial_account_values=initial)
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+
+    snapshot = await broker.account_snapshot()
+
+    # base currency from the unit ExchangeRate row, not the largest magnitude
+    # (the GBP sleeve happens to be larger here, but the signal is authoritative).
+    assert snapshot.base_currency == "GBP"
+    # equity is the BASE total (£1,003,886), NOT the GBP sleeve (£902,839).
+    assert snapshot.equity == Decimal("1003885.69")
+    # base-only aggregates fall through to the GBP sleeve correctly.
+    assert snapshot.buying_power == Decimal("4014481.32")
+    assert snapshot.gross_exposure == Decimal("0.00")
+    assert snapshot.margin_used == Decimal("0.00")
+    # cash_by_ccy carries both sleeves (the "BASE" aggregate row is excluded).
+    assert snapshot.cash_by_ccy == {
+        "GBP": Decimal("902573.77"),
+        "USD": Decimal("134724.51"),
+    }
 
 
 async def test_account_snapshot_requires_connect(
@@ -1047,6 +1112,36 @@ async def test_error_event_ignores_connection_level_reqid(
     assert broker._error_by_order_id == {}  # noqa: SLF001
 
 
+async def test_observed_error_codes_tallies_order_level_pushes(
+    credentials: IBCredentials,
+    rate_limiter: TokenBucketRateLimiter,
+    clock: SimClock,
+) -> None:
+    """M3.2 / OQ-031: the broker tallies order-related error/warning codes
+    (reqId > 0) into observed_error_codes so the empirical-window results
+    sink can count warning 2161 (PMA cap) without log-scraping. Two 2161
+    pushes on distinct orders + one 110 are counted; connection-level
+    events (reqId <= 0) are excluded, symmetric with the rejection stash."""
+    mock_ib = _make_mock_ib()
+    broker = _make_broker(credentials, rate_limiter, clock, mock_ib)
+    await broker.connect()
+
+    mock_ib.errorEvent.emit(101, 2161, "PMA cap: BUY 5 QQL3 LSEETF ...", None)
+    mock_ib.errorEvent.emit(102, 2161, "PMA cap: BUY 5 QQL3 LSEETF ...", None)
+    mock_ib.errorEvent.emit(103, 110, "The price does not conform ...", None)
+    mock_ib.errorEvent.emit(-1, 2104, "Market data farm connection is OK", None)
+    await asyncio.sleep(0)
+
+    codes = broker.observed_error_codes
+    assert codes[2161] == 2
+    assert codes[110] == 1
+    assert 2104 not in codes  # reqId <= 0 excluded
+
+    # The accessor returns a copy — mutating it doesn't touch the broker.
+    codes[2161] = 99
+    assert broker.observed_error_codes[2161] == 2
+
+
 async def test_submit_emits_rejected_when_cancelled_with_error_code_in_log(
     credentials: IBCredentials,
     rate_limiter: TokenBucketRateLimiter,
@@ -1190,11 +1285,11 @@ async def test_submit_unsupported_order_type_raises(
     rate_limiter: TokenBucketRateLimiter,
     clock: SimClock,
 ) -> None:
-    """MOC/LOC/OPG raise NotImplementedError pending v1.1."""
+    """LOC raises NotImplementedError: it needs a limit price Order does not allow it."""
     broker = _make_broker(credentials, rate_limiter, clock, _make_mock_ib())
     await broker.connect()
-    order = _build_order(order_type=OrderType.MOC, limit_price=None)
-    with pytest.raises(NotImplementedError, match="MOC"):
+    order = _build_order(order_type=OrderType.LOC, limit_price=None)
+    with pytest.raises(NotImplementedError, match="LOC"):
         await broker.submit(order)
 
 
@@ -1538,3 +1633,37 @@ async def test_connect_uses_zero_interval_for_short_test_runs(
         assert broker._account_update_task is not None  # type: ignore[attr-defined]
     finally:
         await broker.disconnect()
+
+
+# --- Auction orders: closing auction (MOC) and opening auction (MKT + OPG) ---
+
+
+def test_moc_order_maps_to_ib_market_on_close() -> None:
+    """OrderType.MOC becomes an IB ``MOC`` order for the closing auction."""
+    from blive.adapters.ib.broker import _blive_to_ib_order
+
+    ib_order = _blive_to_ib_order(
+        _build_order(order_type=OrderType.MOC, limit_price=None, quantity=Decimal("7"))
+    )
+    assert ib_order.orderType == "MOC"
+    assert ib_order.action == "BUY"
+    assert ib_order.totalQuantity == 7.0
+    assert ib_order.tif == "DAY"
+
+
+def test_mkt_order_with_opg_tif_maps_to_ib_market_on_open() -> None:
+    """A MKT order with TimeInForce.OPG is the opening-auction (market-on-open) order."""
+    from blive.adapters.ib.broker import _blive_to_ib_order
+
+    ib_order = _blive_to_ib_order(
+        _build_order(
+            order_type=OrderType.MKT,
+            side=OrderSide.SELL,
+            limit_price=None,
+            quantity=Decimal("7"),
+            tif=TimeInForce.OPG,
+        )
+    )
+    assert ib_order.orderType == "MKT"
+    assert ib_order.action == "SELL"
+    assert ib_order.tif == "OPG"

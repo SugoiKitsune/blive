@@ -242,7 +242,7 @@ class IGInstrumentResolver:
         )
         candidates_raw = body.get("markets", []) if isinstance(body, dict) else []
         # Filter to candidates whose epic starts with our family code.
-        candidates = [
+        candidates: list[Mapping[str, Any]] = [
             m
             for m in candidates_raw
             if isinstance(m, dict)
@@ -256,7 +256,7 @@ class IGInstrumentResolver:
             )
         if len(candidates) > 1:
             raise InstrumentAmbiguous(instrument, candidates)
-        epic = candidates[0]["epic"]
+        epic = str(candidates[0]["epic"])
         # Fetch and cache metadata for the resolved epic.
         await self._fetch_and_cache_metadata(epic)
         return epic

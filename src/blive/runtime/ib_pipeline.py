@@ -46,7 +46,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Mapping
+from typing import Mapping, cast
 from uuid import uuid4
 
 import pandas as pd
@@ -133,16 +133,48 @@ class IBMultiRunResult:
     Per ADR-044, the multi-instrument flow has one ``IBBroker.submit``
     call per per-instrument target-weight delta per rebalance; FSM
     counters are aggregate across all instruments.
+
+    M3.2 (per [TASK_REGISTRY M3.2](../../../TASK_REGISTRY.md)) widened the
+    result with the per-symbol + FSM-stage counters the empirical-window
+    results sink needs:
+
+    - ``submitted_by_symbol`` is the per-instrument *placed* denominator
+      for the per-instrument fill-rate (``fills_by_symbol`` is the
+      numerator).
+    - ``accepted_count`` lets the sink report the FSM-trace coverage
+      ratio (SUBMITTED → ACCEPTED → FILLED / CANCELED / REJECTED)
+      exactly rather than inferring acceptance from terminal counts.
+    - ``observed_error_codes`` is the broker's order-related error/warning
+      histogram for this run (see
+      :attr:`blive.adapters.ib.broker.IBBroker.observed_error_codes`);
+      :attr:`cap_binding_2161_count` reads warning 2161 (PMA price-cap)
+      out of it — the OQ-031 signal per INV-14 v0.9.
+
+    All new fields are additive and default-empty; the wire-validated FSM
+    counters (``fills_count`` / ``submitted_count`` / ``canceled_count`` /
+    ``rejected_count``) keep their meaning unchanged.
     """
 
     equity_curve: list[IBMultiEquityPoint] = field(default_factory=list)
     breaches: list[RiskBreach] = field(default_factory=list)
     fills_count: int = 0
     submitted_count: int = 0
+    accepted_count: int = 0
     canceled_count: int = 0
     rejected_count: int = 0
     fills_by_symbol: dict[str, int] = field(default_factory=dict)
+    submitted_by_symbol: dict[str, int] = field(default_factory=dict)
+    observed_error_codes: dict[int, int] = field(default_factory=dict)
     final_equity: Decimal = Decimal("0")
+
+    @property
+    def cap_binding_2161_count(self) -> int:
+        """IB warning-2161 (PMA disruptive-orders price-cap) occurrences
+        observed during the run — the OQ-031 fill-rate signal per
+        [INV-14 v0.9](../../../docs/inv/ib_error_codes.md). Read out of
+        :attr:`observed_error_codes`; ``0`` when none fired.
+        """
+        return self.observed_error_codes.get(2161, 0)
 
 
 # --- Public entry point ------------------------------------------------------
@@ -271,7 +303,9 @@ async def run_ib_pipeline(
 
             await broker.submit(order_for_ib)
             result.submitted_count += 1
-            terminal_state, fill_event = await _drain_order_lifecycle(
+            # Single-instrument IBRunResult does not track per-stage FSM
+            # coverage; discard reached_accepted (the multi pipeline uses it).
+            terminal_state, fill_event, _ = await _drain_order_lifecycle(
                 broker=broker,
                 target_id=ClientOrderId(order_for_ib.client_order_id),
                 timeout_s=event_wait_seconds,
@@ -405,6 +439,11 @@ async def run_ib_multi_pipeline(
     cash = starting_cash
     positions: dict[str, Position] = {}  # keyed by symbol
     result = IBMultiRunResult()
+    # M3.2: baseline the broker's order-error histogram so end-of-run we
+    # record only the codes *this* run produced. Defensive against broker
+    # reuse — the M3.2 driver constructs a fresh broker per run, so the
+    # baseline is normally empty.
+    error_codes_baseline = broker.observed_error_codes
 
     for canonical_bar in canonical_bars:
         t = canonical_bar.close_time_utc
@@ -434,7 +473,11 @@ async def run_ib_multi_pipeline(
         target_weights: dict[str, Decimal] = {}
         for inst in instruments:
             if inst.symbol in weights_row.index:
-                target_weights[inst.symbol] = Decimal(str(float(weights_row[inst.symbol])))
+                # cast: pandas-stubs types Series element access as Any | Series,
+                # but a scalar-label lookup is a scalar at runtime (mypy 2.x, ADR-053).
+                target_weights[inst.symbol] = Decimal(
+                    str(float(cast(float, weights_row[inst.symbol])))
+                )
             else:
                 target_weights[inst.symbol] = Decimal("0")
 
@@ -524,11 +567,21 @@ async def run_ib_multi_pipeline(
 
             await broker.submit(order_for_ib)
             result.submitted_count += 1
-            terminal_state, fill_event = await _drain_order_lifecycle(
+            # M3.2: per-instrument *placed* count (fill-rate denominator).
+            submit_sym = approved.instrument.symbol
+            result.submitted_by_symbol[submit_sym] = (
+                result.submitted_by_symbol.get(submit_sym, 0) + 1
+            )
+            terminal_state, fill_event, reached_accepted = await _drain_order_lifecycle(
                 broker=broker,
                 target_id=ClientOrderId(order_for_ib.client_order_id),
                 timeout_s=event_wait_seconds,
             )
+            # M3.2 FSM-trace coverage: count acceptance once per submitted
+            # order from the primary drain (engine-cancel re-drains below
+            # but must not double-count).
+            if reached_accepted:
+                result.accepted_count += 1
 
             if (
                 terminal_state == OrderState.FILLED
@@ -580,6 +633,15 @@ async def run_ib_multi_pipeline(
             )
         )
 
+    # M3.2: record this run's order-related IB error/warning histogram
+    # (delta vs the entry baseline). ``cap_binding_2161_count`` reads
+    # warning 2161 out of it — the OQ-031 cap-binding signal (INV-14 v0.9).
+    end_codes = broker.observed_error_codes
+    result.observed_error_codes = {
+        code: count - error_codes_baseline.get(code, 0)
+        for code, count in end_codes.items()
+        if count - error_codes_baseline.get(code, 0) > 0
+    }
     result.final_equity = result.equity_curve[-1].equity if result.equity_curve else starting_cash
     return result
 
@@ -655,6 +717,11 @@ def _ib_order_from_desired(
             limit_price = ib_reference * (Decimal("1") + scale)
         else:
             limit_price = ib_reference * (Decimal("1") - scale)
+        # No tick-grid rounding here (ADR-051): the pipeline emits the
+        # economically-intended limit; IBBroker.submit snaps it to the
+        # contract's legal price grid at the wire boundary. (Pre-ADR-051
+        # this quantized to 0.01, which tripped IB error 110 on QQL3's
+        # 0.10 tick.)
         return Order(
             client_order_id=ClientOrderId(uuid4()),
             strategy_id=base.strategy_id,
@@ -663,7 +730,7 @@ def _ib_order_from_desired(
             quantity=base.quantity,
             order_type=OrderType.LMT,
             time_in_force=TimeInForce.DAY,
-            limit_price=limit_price.quantize(Decimal("0.01")),
+            limit_price=limit_price,
             stop_price=None,
             parent_id=None,
             tags={**base.tags, "pipeline": "m2-ib.5"},
@@ -693,13 +760,20 @@ async def _drain_order_lifecycle(
     timeout_s: float,
     settle_on_accepted: bool = False,
     accepted_grace_s: float = 1.0,
-) -> tuple[OrderState, OrderEvent | None]:
+) -> tuple[OrderState, OrderEvent | None, bool]:
     """Pull events from the broker until ``target_id`` reaches a terminal state.
 
-    Returns the final state plus the (optional) fill-bearing event that
-    decided it. On timeout (terminal not reached within ``timeout_s``),
-    returns the latest non-terminal state seen — the caller decides
-    whether to cancel.
+    Returns ``(final_state, fill_event, reached_accepted)``:
+
+    - ``final_state`` — the terminal state, or the latest non-terminal
+      state seen on timeout (the caller decides whether to cancel).
+    - ``fill_event`` — the (optional) fill-bearing event that decided it.
+    - ``reached_accepted`` — whether the order was ever observed at
+      ACCEPTED or beyond (PARTIALLY_FILLED / FILLED). Lets the caller
+      report FSM-trace coverage (M3.2): an order that times out in
+      SUBMITTED never reached ACCEPTED, whereas one that reached ACCEPTED
+      and then engine-cancelled did. REJECTED orders that skip ACCEPTED
+      keep this ``False``.
 
     ``settle_on_accepted``: a LOO/DAY order queued for the open is acknowledged
     (SUBMITTED/ACCEPTED) and then simply works until the auction — a terminal
@@ -714,16 +788,17 @@ async def _drain_order_lifecycle(
     queue = broker._events  # noqa: SLF001 — pipeline-internal access
     fill_event: OrderEvent | None = None
     state = OrderState.SUBMIT_PENDING
+    reached_accepted = False
     deadline = asyncio.get_event_loop().time() + timeout_s
 
     while True:
         remaining = deadline - asyncio.get_event_loop().time()
         if remaining <= 0:
-            return state, fill_event
+            return state, fill_event, reached_accepted
         try:
             event = await asyncio.wait_for(queue.get(), timeout=remaining)
         except asyncio.TimeoutError:
-            return state, fill_event
+            return state, fill_event, reached_accepted
         if not isinstance(event, OrderEvent):
             continue
         if event.client_order_id != target_id:
@@ -732,11 +807,14 @@ async def _drain_order_lifecycle(
             state = OrderState.SUBMITTED
         elif event.kind == OrderEventKind.ACCEPTED:
             state = OrderState.ACCEPTED
+            reached_accepted = True
         elif event.kind == OrderEventKind.PARTIAL_FILL:
             state = OrderState.PARTIALLY_FILLED
+            reached_accepted = True
             fill_event = event
         elif event.kind == OrderEventKind.FILLED:
             state = OrderState.FILLED
+            reached_accepted = True
             fill_event = event
             break
         elif event.kind == OrderEventKind.CANCELED:
@@ -754,7 +832,7 @@ async def _drain_order_lifecycle(
             deadline = min(deadline, asyncio.get_event_loop().time() + accepted_grace_s)
 
     assert state in TERMINAL_ORDER_STATES
-    return state, fill_event
+    return state, fill_event, reached_accepted
 
 
 def _risk_config_from_live(live: LiveStrategy) -> RiskEngineConfig:

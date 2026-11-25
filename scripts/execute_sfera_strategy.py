@@ -1885,7 +1885,7 @@ async def _run(args: argparse.Namespace) -> int:
         _pfl = {c for c in sleeve_flip if sleeve_flip.get(c)}
         _placed[_psym] = {"qty": _pqty, "pre_pos": _ppre,
                           "sleeves": sorted((_sleeves_of(_psym) & _pfl) or _sleeves_of(_psym))}
-        terminal_state, _ = await _drain_order_lifecycle(
+        terminal_state, _, _ = await _drain_order_lifecycle(
             broker=broker,
             target_id=ClientOrderId(order.client_order_id),
             timeout_s=args.event_wait_seconds,

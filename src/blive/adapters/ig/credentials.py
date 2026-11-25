@@ -32,7 +32,6 @@ from blive.adapters.shared.credentials import (
     load_credentials,
 )
 
-
 # --- Schema (consumed by load_credentials) ----------------------------------
 
 IG_SCHEMA: CredentialSchema = CredentialSchema(

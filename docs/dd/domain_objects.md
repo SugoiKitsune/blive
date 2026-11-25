@@ -3,8 +3,8 @@ id: DD-1
 title: Domain Objects Data Dictionary
 status: STABLE
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.2
+last_reviewed: 2026-06-05
+version: 0.3
 sources:
   - REQUIREMENTS.md §5.3 (Order shape, FSM)
   - REQUIREMENTS.md §5.4 (Position, AccountSnapshot)
@@ -326,6 +326,17 @@ Account-level financials at a point in time. Lifted from REQUIREMENTS §5.4.
 **Lineage.** Sampled every 30 s by the engine from
 `BrokerPort.account_snapshot()`; persisted per
 [REQUIREMENTS §6.5](../../REQUIREMENTS.md) retention.
+
+**Mixed-currency note (M3.4, 2026-06-05).** In a multi-currency account IB
+reports `NetLiquidationByCurrency` for *each* currency sleeve **and** a `BASE`
+aggregate; `equity` is the **`BASE` aggregate** (the whole-account total in
+`base_currency`), never a single-currency sleeve. The IB adapter reads the
+`BASE` row primary, falling back to the base-currency sleeve, and infers
+`base_currency` from the unit `ExchangeRate` row (not by comparing unconverted
+cross-currency magnitudes). Verified live on IB `DUP886336` (GBP base + USD
+cash): equity £1,003,855 = GBP sleeve £902,839 + the USD sleeve (~£100k),
+*not* the GBP sleeve alone — the bug M3.4 caught and fixed. `cash_by_ccy`
+carries the per-currency sleeves (the `BASE` row is excluded).
 
 ---
 

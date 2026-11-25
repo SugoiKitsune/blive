@@ -47,7 +47,6 @@ from blive.domain.types import (
     TimeInForce,
 )
 
-
 # --- Fixtures ---------------------------------------------------------------
 
 

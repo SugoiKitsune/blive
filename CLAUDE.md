@@ -62,7 +62,7 @@ Hexagonal: `blive.domain.*` → ports; `blive.adapters.*` → ports. The domain 
 
 ## Toolchain
 
-- Python 3.11.x exactly. `uv sync --extra dev` then `uv run pytest -q`.
+- Python **3.12.x** (3.11 still resolvable during the transition — see [ADR-053](docs/decisions/DECISIONS.md#adr-053--upgrade-to-python-312)). `uv sync --extra dev` then `uv run pytest -q`.
 - Pre-commit gates: `pytest`, `mypy --strict`, `lint-imports`, `black --check`, `isort --check-only`.
 - If a gate fails, fix the root cause; never bypass with `--no-verify` or `--no-gpg-sign`.
 

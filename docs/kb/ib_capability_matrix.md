@@ -1,10 +1,10 @@
 ---
 id: KB-2
 title: IB Capability Matrix
-status: DRAFT
+status: STABLE
 owner: Claude
-last_reviewed: 2026-04-27
-version: 0.1.1
+last_reviewed: 2026-06-05
+version: 1.0
 sources:
   - https://interactivebrokers.github.io/tws-api/introduction.html       # accessed 2026-04-26
   - https://interactivebrokers.github.io/tws-api/order_submission.html   # accessed 2026-04-26
@@ -53,7 +53,7 @@ Out of scope: pacing limits and quotas (KB-3), ib_async-specific Python wrapping
 | **IB Gateway** | TCP socket on `127.0.0.1:4001` (live) / `4002` (paper) | local | headless / Docker; recommended for automation |
 | **CPAPI / Web API** | HTTPS REST + WebSocket via local Java gateway | session token via tickle | cloud deploys, but operationally worse for serious execution; see [REQUIREMENTS §9.3](../../REQUIREMENTS.md) |
 
-For blive: **IB Gateway in Docker** ([REQUIREMENTS §12](../../REQUIREMENTS.md)). TWS API only (per [ADR-002](../decisions/DECISIONS.md#adr-002--adopt-ib_async-v21-as-wire-level-ib-driver)). CPAPI rejected.
+For blive: **IB Gateway in Docker** ([REQUIREMENTS §12](../../REQUIREMENTS.md)). TWS API only (per [ADR-002](../decisions/DECISIONS.md#adr-002--adopt-ib_async-v21-as-wire-level-ib-driver)). CPAPI rejected. **Phase 1 deployment is the native Windows IB Gateway** (no Docker / IBC) per [ADR-040](../decisions/DECISIONS.md#adr-040--phase-1-deployment-target-windows-host-with-native-ib-gateway); the Docker + IBC bundling is deferred to M8 production cutover.
 
 ---
 
@@ -74,7 +74,7 @@ For blive: **IB Gateway in Docker** ([REQUIREMENTS §12](../../REQUIREMENTS.md))
 | Mutual funds | ✓ | — | out of v1 |
 | CFDs | ✓ (non-US accounts) | per-exchange | out of v1 |
 
-`Contract` resolution is by `ConID` (an integer IB ID); blive's `Instrument` ↔ `Contract` mapping happens in `IBBroker` and is documented in [DD-7 instrument_dictionary](../dd/instrument_dictionary.md) (MISSING).
+`Contract` resolution is by `ConID` (an integer IB ID); blive's `Instrument` ↔ `Contract` mapping happens in `IBBroker` and is documented in [DD-7 instrument_dictionary](../dd/instrument_dictionary.md) (STABLE v1.5).
 
 ---
 
@@ -144,6 +144,8 @@ Available via `Order.algoStrategy` + `algoParams`:
 
 For blive v1: Adaptive (Patient default) for non-MOC orders. TWAP/VWAP available via `live_overrides.algo` for high-impact rebalances. Algo selection per strategy.
 
+**Wire finding (M2-IB.6.2c / M3.2):** `Adaptive` is available and correctly routed (`algoStrategy='Adaptive'`), but it does **not** bypass IB's regulatory Price-Management-Algo cap (warning **2161**) on UK-retail leveraged ETPs — QQL3 still doesn't fill under Adaptive (and the *visible* cap may not even fire; the non-fill is structural). See [INV-14](../inv/ib_error_codes.md) (2161), [ADR-049](../decisions/DECISIONS.md#adr-049--ordertypeadaptive_mkt-for-ibalgo-adaptive-routing-empirical-pma-cap-finding), [OQ-031](../decisions/OPEN_QUESTIONS.md#oq-031--phase-1-deployment-under-pma-bound-retail-account).
+
 ---
 
 ## 7. Market Hours
@@ -207,3 +209,4 @@ Operational implications captured in [REQUIREMENTS §10 / §12](../../REQUIREMEN
 
 - **v0.1 (2026-04-26)** — initial bootstrap from IB docs.
 - **v0.1.1 (2026-04-27)** — M2-entry review pass. No amendments needed; sources re-verified at IB docs (TWS API + Campus pages + `ib_async` README). The DRAFT → STABLE flip is deferred to M2 close once the IB read-side adapter has exercised the §2 (asset classes), §3 (order types), §4 (TIFs), §5 (routing), and §6 (algos) surfaces against IB Paper.
+- **v1.0 (2026-06-05 / M3.6) — DRAFT → STABLE.** The Phase-1 IB surface is now wire-exercised end-to-end across M2-IB.6 + M3: §2 asset classes (US equities + LSE-ETF), §3 order types (MKT / LMT + ADAPTIVE_MKT), §5 routing (SMART + `primaryExchange=LSEETF` per [ADR-048](../decisions/DECISIONS.md#adr-048--lse-etf-smart-routing-discriminator-refines-adr-046)), §6 algos (Adaptive — with the 2161-cap finding added above), §7 market hours (LSE-RTH captures), §8 multi-currency (M3.4 live GBP+USD reconciliation). Stale ref fixed (DD-7 now STABLE v1.5); ADR-040 Phase-1-deployment + the 2161/Adaptive wire finding folded in. **Scope of STABLE: the Phase-1 equity/ETF surface.** Phase-2's futures / volatility instruments (VIX futures, leveraged / vol ETPs per the OQ-032 redesign) will re-exercise §2 / §3 / §6 / §7 and may flip this back to STALE for re-review.

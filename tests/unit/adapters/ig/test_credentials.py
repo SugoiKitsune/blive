@@ -18,7 +18,6 @@ from blive.adapters.ig.credentials import (
 )
 from blive.adapters.shared.credentials import CredentialsMissing
 
-
 # --- IG_SCHEMA contract ------------------------------------------------------
 
 

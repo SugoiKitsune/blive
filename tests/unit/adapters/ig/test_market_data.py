@@ -41,7 +41,6 @@ from blive.adapters.shared.rate_limiter import (
 )
 from blive.domain.types import AssetClass, Instrument
 
-
 # --- Fixtures ---------------------------------------------------------------
 
 
@@ -96,9 +95,7 @@ def _make_market_data(
             buckets={
                 "general": RateLimitBucket(capacity=100, refill_per_second=Decimal("10")),
                 "trading": RateLimitBucket(capacity=100, refill_per_second=Decimal("10")),
-                "historical_prices": RateLimitBucket(
-                    capacity=100, refill_per_second=Decimal("10")
-                ),
+                "historical_prices": RateLimitBucket(capacity=100, refill_per_second=Decimal("10")),
             }
         ),
     )
@@ -449,9 +446,7 @@ async def test_historical_bars_uses_historical_prices_bucket(
             buckets={
                 "general": RateLimitBucket(capacity=10, refill_per_second=Decimal("10")),
                 "trading": RateLimitBucket(capacity=10, refill_per_second=Decimal("10")),
-                "historical_prices": RateLimitBucket(
-                    capacity=1, refill_per_second=Decimal("0.5")
-                ),
+                "historical_prices": RateLimitBucket(capacity=1, refill_per_second=Decimal("0.5")),
             }
         ),
     )
@@ -506,9 +501,7 @@ def test_lightstreamer_chart_item_format() -> None:
     assert _lightstreamer_chart_item("IX.D.CAC40.CASH.IP", "1m") == (
         "CHART:IX.D.CAC40.CASH.IP:1MINUTE"
     )
-    assert _lightstreamer_chart_item("IX.D.CAC40.CASH.IP", "1d") == (
-        "CHART:IX.D.CAC40.CASH.IP:DAY"
-    )
+    assert _lightstreamer_chart_item("IX.D.CAC40.CASH.IP", "1d") == ("CHART:IX.D.CAC40.CASH.IP:DAY")
 
 
 # --- Streaming: _stream_ohlc + _build_bar_from_state -----------------------
@@ -554,9 +547,7 @@ def test_build_bar_from_state_full(cac40_cfd: Instrument) -> None:
         "OFR_CLOSE": "7032",
         "LTV": "12345",
     }
-    bar = _build_bar_from_state(
-        state, instrument=cac40_cfd, bar_duration=timedelta(minutes=1)
-    )
+    bar = _build_bar_from_state(state, instrument=cac40_cfd, bar_duration=timedelta(minutes=1))
     expected_close = datetime.fromtimestamp(utm_ms / 1000.0, tz=timezone.utc)
     assert bar.close_time_utc == expected_close
     assert bar.open_time_utc == expected_close - timedelta(minutes=1)
@@ -578,23 +569,23 @@ def test_build_bar_from_state_missing_utm_raises(cac40_cfd: Instrument) -> None:
         "OFR_CLOSE": "1",
     }
     with pytest.raises(ValueError, match="UTM"):
-        _build_bar_from_state(
-            state, instrument=cac40_cfd, bar_duration=timedelta(minutes=1)
-        )
+        _build_bar_from_state(state, instrument=cac40_cfd, bar_duration=timedelta(minutes=1))
 
 
 def test_build_bar_from_state_negative_volume_clamped(cac40_cfd: Instrument) -> None:
     state = {
         "UTM": "1745832000000",
-        "BID_OPEN": "1", "OFR_OPEN": "1",
-        "BID_HIGH": "1", "OFR_HIGH": "1",
-        "BID_LOW": "1", "OFR_LOW": "1",
-        "BID_CLOSE": "1", "OFR_CLOSE": "1",
+        "BID_OPEN": "1",
+        "OFR_OPEN": "1",
+        "BID_HIGH": "1",
+        "OFR_HIGH": "1",
+        "BID_LOW": "1",
+        "OFR_LOW": "1",
+        "BID_CLOSE": "1",
+        "OFR_CLOSE": "1",
         "LTV": "-5",
     }
-    bar = _build_bar_from_state(
-        state, instrument=cac40_cfd, bar_duration=timedelta(minutes=1)
-    )
+    bar = _build_bar_from_state(state, instrument=cac40_cfd, bar_duration=timedelta(minutes=1))
     assert bar.volume == Decimal("0")
 
 
@@ -696,10 +687,14 @@ async def test_subscribe_bars_yields_multiple_bars(cac40_cfd: Instrument) -> Non
     # First consolidation
     fake_sub.push(
         {
-            "BID_OPEN": "7000", "OFR_OPEN": "7002",
-            "BID_HIGH": "7050", "OFR_HIGH": "7052",
-            "BID_LOW": "6990", "OFR_LOW": "6992",
-            "BID_CLOSE": "7030", "OFR_CLOSE": "7032",
+            "BID_OPEN": "7000",
+            "OFR_OPEN": "7002",
+            "BID_HIGH": "7050",
+            "OFR_HIGH": "7052",
+            "BID_LOW": "6990",
+            "OFR_LOW": "6992",
+            "BID_CLOSE": "7030",
+            "OFR_CLOSE": "7032",
             "LTV": "100",
             "UTM": "1745832000000",
             "CONS_END": "1",
@@ -708,10 +703,14 @@ async def test_subscribe_bars_yields_multiple_bars(cac40_cfd: Instrument) -> Non
     # Second consolidation (next bar)
     fake_sub.push(
         {
-            "BID_OPEN": "7030", "OFR_OPEN": "7032",
-            "BID_HIGH": "7080", "OFR_HIGH": "7082",
-            "BID_LOW": "7020", "OFR_LOW": "7022",
-            "BID_CLOSE": "7060", "OFR_CLOSE": "7062",
+            "BID_OPEN": "7030",
+            "OFR_OPEN": "7032",
+            "BID_HIGH": "7080",
+            "OFR_HIGH": "7082",
+            "BID_LOW": "7020",
+            "OFR_LOW": "7022",
+            "BID_CLOSE": "7060",
+            "OFR_CLOSE": "7062",
             "LTV": "200",
             "UTM": "1745832060000",
             "CONS_END": "1",
@@ -746,10 +745,14 @@ async def test_subscribe_bars_skips_malformed_consolidation(
     # First consolidation: missing UTM → skipped.
     fake_sub.push(
         {
-            "BID_OPEN": "1", "OFR_OPEN": "1",
-            "BID_HIGH": "1", "OFR_HIGH": "1",
-            "BID_LOW": "1", "OFR_LOW": "1",
-            "BID_CLOSE": "1", "OFR_CLOSE": "1",
+            "BID_OPEN": "1",
+            "OFR_OPEN": "1",
+            "BID_HIGH": "1",
+            "OFR_HIGH": "1",
+            "BID_LOW": "1",
+            "OFR_LOW": "1",
+            "BID_CLOSE": "1",
+            "OFR_CLOSE": "1",
             "CONS_END": "1",
         }
     )
@@ -757,10 +760,14 @@ async def test_subscribe_bars_skips_malformed_consolidation(
     fake_sub.push(
         {
             "UTM": "1745832060000",
-            "BID_OPEN": "7000", "OFR_OPEN": "7002",
-            "BID_HIGH": "7050", "OFR_HIGH": "7052",
-            "BID_LOW": "6990", "OFR_LOW": "6992",
-            "BID_CLOSE": "7030", "OFR_CLOSE": "7032",
+            "BID_OPEN": "7000",
+            "OFR_OPEN": "7002",
+            "BID_HIGH": "7050",
+            "OFR_HIGH": "7052",
+            "BID_LOW": "6990",
+            "OFR_LOW": "6992",
+            "BID_CLOSE": "7030",
+            "OFR_CLOSE": "7032",
             "LTV": "100",
             "CONS_END": "1",
         }
